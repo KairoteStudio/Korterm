@@ -2296,17 +2296,25 @@ impl TerminalPanel {
                 // extra) sits above the titlebar and hosts no content.
                 self.strip_base_h = size.height - self.strip_extra_applied;
                 self.terminal_height = self.strip_base_h - 44.0 - 26.0;
+                // Whether the tabs overflow depends on the window width,
+                // so a maximize / un-maximize changes the answer without
+                // changing the tab count. Re-estimate here, otherwise the
+                // drag strip gets stuck showing after a maximize (or stuck
+                // hidden after leaving fullscreen) until the next tab
+                // add/remove.
+                let mut tasks = vec![self.sync_drag_strip()];
                 // A resize re-lays out the titlebar tab strip and resets
                 // its scroll offset — restore the saved position.
                 if self.tabs_scroll_x > 0.0 {
-                    return iced::widget::operation::scroll_to(
+                    tasks.push(iced::widget::operation::scroll_to(
                         iced::widget::Id::new("titlebar-tabs"),
                         iced::widget::scrollable::AbsoluteOffset {
                             x: Some(self.tabs_scroll_x),
                             y: None,
                         },
-                    );
+                    ));
                 }
+                return Task::batch(tasks);
             }
             Event::Keyboard(iced::keyboard::Event::ModifiersChanged(m)) => {
                 self.modifiers = *m;

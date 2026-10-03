@@ -264,12 +264,14 @@ mod tests {
 
     #[test]
     fn serialize_parse_roundtrip() {
-        let mut cfg = Config::default();
-        cfg.tabs_vertical = true;
-        cfg.sidebar_width = 260.0;
-        cfg.shell = "fish".into();
-        cfg.glow_blue = 0x112233;
-        cfg.glow_intensity_top = 1.4;
+        let mut cfg = Config {
+            tabs_vertical: true,
+            sidebar_width: 260.0,
+            shell: "fish".into(),
+            glow_blue: 0x112233,
+            glow_intensity_top: 1.4,
+            ..Default::default()
+        };
         cfg.keybinds.push(("paste".into(), "ctrl+shift+v".into()));
 
         let mut parsed = Config::default();

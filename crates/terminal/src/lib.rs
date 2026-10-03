@@ -763,7 +763,7 @@ mod tests {
             t.buf.line_feed();
             let row = t.buf.lines.len() - 1;
             let s = format!("L{row}");
-            t.buf.write_char(s.chars().next().unwrap() as u32, row, "");
+            t.buf.write_char(s.chars().next().unwrap() as u32, 1, "");
         }
     }
 
@@ -781,24 +781,18 @@ mod tests {
         assert_eq!(before.end.1, total - t.buf.rows + 2);
 
         // Scroll up into history: the stored absolute lines must NOT
-        // change, and the highlighted screen rows must move DOWN (the
-        // text slides down under a fixed top edge) — that is what makes
-        // the highlight stick to its text instead of floating.
+        // change, and the highlighted line must slide DOWN the screen
+        // (text moves down when you scroll up) — that is what makes the
+        // highlight stick to its text instead of floating.
         t.scroll_lines(-3);
         assert_eq!(t.view_offset, 3);
         assert_eq!(t.selection.unwrap().start.1, before.start.1);
         assert_eq!(t.selection.unwrap().end.1, before.end.1);
 
-        let row_before = abs_line_of_row(&t, 1);
-        let row_after = abs_line_of_row(&t, 1 + 3);
-        assert_eq!(
-            row_before, before.start.1,
-            "screen row 1 must still map to the selected line"
-        );
-        assert_eq!(
-            row_after, before.start.1,
-            "scrolling up pushes the selected line further down the screen"
-        );
+        // Screen row 1 now shows a line 3 rows ABOVE the selection …
+        assert_eq!(abs_line_of_row(&t, 1), before.start.1 - 3);
+        // … and the selected line itself is now 3 rows further down.
+        assert_eq!(abs_line_of_row(&t, 1 + 3), before.start.1);
 
         // Scrolling back returns it to its original screen row.
         t.scroll_lines(3);

@@ -40,5 +40,11 @@ jobs:
       - name: cargo test
         run: cargo test --locked
 
+      - name: cargo test (vendored crates)
+        # `cargo test` skips path dependencies, so the terminal crate's
+        # tests (selection anchoring, cursor visibility, …) would never
+        # run in CI without this.
+        run: cargo test --locked -p terminal
+
       - name: cargo clippy
-        run: cargo clippy --locked -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings

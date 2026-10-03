@@ -39,6 +39,9 @@ jobs:
       - name: cargo test
         run: cargo test --locked --release
 
+      - name: cargo test (vendored crates)
+        run: cargo test --locked --release -p terminal
+
       - name: Verify tag matches package version
         run: |
           PKG_VERSION="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"

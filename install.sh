@@ -15,7 +15,7 @@ cd "$(dirname "$0")"
 
 SIZES=(16 32 48 64 128 256 512)
 
-install() {
+do_install() {
     local prefix="${1:-$HOME/.local}"
     local bin="target/release/korterm"
 
@@ -25,12 +25,15 @@ install() {
     fi
 
     echo "==> installing to $prefix"
-    install -Dm755 "$bin" "$prefix/bin/korterm"
+    # `command install` — the coreutils binary, NOT a recursive call to
+    # this function (a bare `install` here would resolve to the function
+    # itself and recurse forever).
+    command install -Dm755 "$bin" "$prefix/bin/korterm"
     for s in "${SIZES[@]}"; do
-        install -Dm644 "assets/icon-$s.png" \
+        command install -Dm644 "assets/icon-$s.png" \
             "$prefix/share/icons/hicolor/${s}x${s}/apps/korterm.png"
     done
-    install -Dm644 assets/korterm.desktop \
+    command install -Dm644 assets/korterm.desktop \
         "$prefix/share/applications/korterm.desktop"
 
     # Best-effort cache refresh (new icons/menu entries without relogin).
@@ -59,5 +62,5 @@ uninstall() {
 
 case "${1:-}" in
     --uninstall) uninstall "${2:-}" ;;
-    *)           install "$1" ;;
+    *)           do_install "$1" ;;
 esac

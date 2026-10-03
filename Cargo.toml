@@ -8,7 +8,7 @@ version = "1.0.0"
 description = "Korterm - Standalone Terminal Application"
 edition = "2021"
 license = "MPL-2.0"
-categories = ["terminal", "gui"]
+categories = ["command-line-utilities", "gui"]
 keywords = ["terminal", "emulator", "iced", "gui"]
 
 [[bin]]
@@ -18,10 +18,10 @@ path = "src/main.rs"
 [dependencies]
 iced = { version = "0.14", features = ["wgpu", "svg", "image", "advanced", "canvas", "tokio"] }
 iced_winit = "0.14"
-terminal = { path = "../Kortina.ICED/terminal" }
+terminal = { path = "crates/terminal" }
 dirs = "5"
 tokio = { version = "1", features = ["time"] }
-vector-icons = { path = "../Kortina.ICED/vector-icons" }
+vector-icons = { path = "crates/vector-icons" }
 
 # Debian package: `cargo install cargo-deb && cargo deb`
 # (asset paths point at the flat files generated from assets/icon.svg)

@@ -347,6 +347,10 @@ pub enum Message {
     DragTitlebar,
     MainWindowReady(iced::window::Id),
     Tick,
+    /// True no-op (unmapped events, empty clipboard reads, …). `Tick`
+    /// advances cursor animations, so it must never be used as a
+    /// fallback — every keypress would visibly jerk the cursor.
+    Nop,
     TermPump,
     AnimTick,
     /// A terminal was spawned asynchronously (from `create_terminal`).
@@ -430,6 +434,7 @@ impl Clone for Message {
             Message::DragTitlebar => Message::DragTitlebar,
             Message::MainWindowReady(id) => Message::MainWindowReady(*id),
             Message::Tick => Message::Tick,
+            Message::Nop => Message::Nop,
             Message::TermPump => Message::TermPump,
             Message::AnimTick => Message::AnimTick,
             Message::TerminalSpawned { seq, title, base } => Message::TerminalSpawned {
@@ -515,6 +520,7 @@ impl std::fmt::Debug for Message {
             Message::DragTitlebar => write!(f, "DragTitlebar"),
             Message::MainWindowReady(id) => write!(f, "MainWindowReady({id:?})"),
             Message::Tick => write!(f, "Tick"),
+            Message::Nop => write!(f, "Nop"),
             Message::TermPump => write!(f, "TermPump"),
             Message::AnimTick => write!(f, "AnimTick"),
             Message::TerminalSpawned { seq, title, base, .. } => {
@@ -589,8 +595,17 @@ impl TerminalPanel {
             shell_menu_open: false,
             shell_menu_anim_t: 0.0,
             picker_anim_t: 0.0,
-            toggle_progress: [1.0, 0.0],
-            toggle_anim_target: [1, 0],
+            // Settings toggles start at the restored config values, not
+            // hardcoded "on" — otherwise the switches visibly snap when
+            // the first AnimTick pulls them to the real target.
+            toggle_progress: [
+                cfg.statusbar_visible as u8 as f32,
+                cfg.tabs_vertical as u8 as f32,
+            ],
+            toggle_anim_target: [
+                cfg.statusbar_visible as usize,
+                cfg.tabs_vertical as usize,
+            ],
             search_open: false,
             search_closing: false,
             search_anim_t: 0.0,
@@ -615,7 +630,7 @@ impl TerminalPanel {
         let init = iced::window::latest().map(|opt| {
             match opt {
                 Some(id) => Message::MainWindowReady(id),
-                None => Message::Tick,
+                None => Message::Nop,
             }
         });
         // Create first terminal asynchronously (honor the remembered shell)
@@ -627,7 +642,10 @@ impl TerminalPanel {
                 let term =
                     terminal::Terminal::with_shell_async(80, 24, shell_opt.as_deref(), None)
                         .await;
-                PENDING_TERMS.lock().unwrap().push((seq0, Box::new(term)));
+                PENDING_TERMS
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((seq0, Box::new(term)));
             },
             |_| {
                 Message::TerminalSpawned {
@@ -1281,7 +1299,8 @@ impl TerminalPanel {
                     if let Some(text) = s {
                         Message::TermWrite(text.into_bytes())
                     } else {
-                        Message::Tick
+                        // No text on the clipboard — do nothing.
+                        Message::Nop
                     }
                 });
             }
@@ -1323,11 +1342,29 @@ impl TerminalPanel {
                     session.term.tick_blink(self.terminal_focused);
                 }
             }
+            Message::Nop => {}
             Message::TermPump => {
                 // Drain PTY output for all live terminals
                 for session in &mut self.terminals {
                     session.term.pump();
                 }
+                // Close tabs whose shell has exited — a dead PTY would
+                // otherwise silently swallow every keystroke (write errors
+                // are intentionally ignored by the terminal core). Reuse
+                // `TermClose` so active-tab fixups and the drag-strip
+                // sync all apply; it is bounds-safe.
+                let mut dead = Vec::new();
+                for (idx, session) in self.terminals.iter_mut().enumerate() {
+                    if !session.term.is_alive() {
+                        dead.push(idx);
+                    }
+                }
+                // Highest index first so removals don't shift pending ones.
+                let mut tasks = Vec::new();
+                for idx in dead.into_iter().rev() {
+                    tasks.push(self.update(Message::TermClose(idx)));
+                }
+                return Task::batch(tasks);
             }
             Message::AnimTick => {
                 // 60 fps animation tick — advance cursor animations and
@@ -2684,10 +2721,30 @@ fn expand_path(p: &str) -> Option<std::path::PathBuf> {
     }
 }
 
+/// Percent-decode a URL path (`%20` → space, `%E4%B8%AD` → 中). Invalid
+/// escapes pass through unchanged — xdg-open can still cope with them.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let hex = |b: u8| (b as char).to_digit(16).map(|d| d as u8);
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| s.to_string())
+}
+
 /// Classify a terminal word as a jump target: URL, file path, or
 /// `path:line(:col)` location. Returns the target to hand to `xdg-open`.
-fn classify_jump_target(word: &str) -> Option<String> {
-    let word = word
+fn classify_jump_target(word: &str) -> Option<String> {    let word = word
         .trim_matches(|c: char| {
             "()[]{}<>\"'`.,;:!?".contains(c) || c == '‘' || c == '’' || c == '“' || c == '”'
         })
@@ -2700,9 +2757,9 @@ fn classify_jump_target(word: &str) -> Option<String> {
     if word.starts_with("http://") || word.starts_with("https://") {
         return Some(word.to_string());
     }
-    // file:// URL → local path.
+    // file:// URL → local path (percent-decoded: `%20` → space, etc.).
     if let Some(rest) = word.strip_prefix("file://") {
-        return Some(rest.to_string());
+        return Some(percent_decode(rest));
     }
 
     // File path, optionally followed by :line or :line:col.
@@ -2742,7 +2799,7 @@ static PENDING_TERMS: std::sync::Mutex<Vec<(usize, Box<terminal::Terminal>)>> =
 
 /// Take a spawned terminal from the handoff queue by its sequence number.
 fn take_pending_term(seq: usize) -> Option<Box<terminal::Terminal>> {
-    let mut q = PENDING_TERMS.lock().unwrap();
+    let mut q = PENDING_TERMS.lock().unwrap_or_else(|e| e.into_inner());
     let pos = q.iter().position(|(s, _)| *s == seq)?;
     Some(q.remove(pos).1)
 }
@@ -2896,10 +2953,10 @@ fn keyboard_event_to_message(k: &iced::keyboard::Event, status: iced::event::Sta
                 let key_part = match key {
                     Key::Character(s) => s.to_lowercase(),
                     Key::Named(named) => crate::keybinds::named_key_name(*named).to_string(),
-                    _ => return Message::Tick,
+                    _ => return Message::Nop,
                 };
                 if key_part.is_empty() {
-                    return Message::Tick;
+                    return Message::Nop;
                 }
                 let mut combo = String::new();
                 if modifiers.control() {
@@ -2935,7 +2992,7 @@ fn keyboard_event_to_message(k: &iced::keyboard::Event, status: iced::event::Sta
 
             // If a widget already handled the key, don't forward to terminal
             if status == iced::event::Status::Captured {
-                return Message::Tick;
+                return Message::Nop;
             }
 
             // Ctrl+letter → control character
@@ -2964,9 +3021,9 @@ fn keyboard_event_to_message(k: &iced::keyboard::Event, status: iced::event::Sta
                 }
             }
 
-            Message::Tick
+            Message::Nop
         }
-        KE::KeyReleased { .. } => Message::Tick,
+        KE::KeyReleased { .. } => Message::Nop,
     }
 }
 
@@ -3028,6 +3085,15 @@ mod tests {
     }
 
     #[test]
+    fn percent_decode_decodes_escapes() {
+        assert_eq!(percent_decode("/home/a%20b"), "/home/a b");
+        assert_eq!(percent_decode("%E4%B8%AD.txt"), "中.txt");
+        // Invalid escapes pass through untouched.
+        assert_eq!(percent_decode("100%ZZ"), "100%ZZ");
+        assert_eq!(percent_decode("plain"), "plain");
+    }
+
+    #[test]
     fn classify_urls_and_file_urls() {
         assert_eq!(
             classify_jump_target("https://example.com"),
@@ -3041,6 +3107,17 @@ mod tests {
             classify_jump_target("file:///usr/share/doc"),
             Some("/usr/share/doc".to_string())
         );
+        // Percent-encoded paths decode before hitting the filesystem.
+        let dir = std::env::temp_dir().join(format!("korterm-decode-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a b.txt");
+        std::fs::write(&file, "x").unwrap();
+        let word = format!("file://{}/a%20b.txt", dir.display());
+        assert_eq!(
+            classify_jump_target(&word),
+            Some(file.to_string_lossy().into_owned())
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(classify_jump_target(""), None);
     }
 

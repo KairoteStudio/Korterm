@@ -19,7 +19,25 @@ use iced::{Element, Length, Size, Task, Theme};
 
 use crate::theme;
 
-const SOCK_ENV_FALLBACK: &str = "/tmp";
+/// Handoff slot for the pre-bound single-instance socket: `run()` binds
+/// it before iced starts (atomic lock), the IPC task picks it up here.
+static QUICK_LISTENER: std::sync::Mutex<Option<std::os::unix::net::UnixListener>> =
+    std::sync::Mutex::new(None);
+
+/// Path of the single-instance toggle socket. `$XDG_RUNTIME_DIR` is a
+/// user-owned tmpfs; falling back to the user's cache dir keeps the
+/// socket out of world-writable `/tmp`, where any local user could
+/// pre-create it and permanently break the toggle for the real user.
+fn quick_socket_path() -> Option<std::path::PathBuf> {
+    if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
+        if !dir.is_empty() {
+            return Some(std::path::Path::new(&dir).join("korterm-quick.sock"));
+        }
+    }
+    let dir = dirs::cache_dir()?.join("korterm");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join("korterm-quick.sock"))
+}
 
 /// Handoff slot for the asynchronously spawned terminal: widgets require
 /// `Message: Clone` and a PTY must never be duplicated, so the Terminal
@@ -102,6 +120,8 @@ pub struct QuickState {
     menu_pos: (f32, f32),
     /// Last known mouse position over the panel.
     mouse_pos: (f32, f32),
+    /// A PTY flush is already scheduled (resize debounce in flight).
+    resize_pending: bool,
 }
 
 pub enum Message {
@@ -110,6 +130,7 @@ pub enum Message {
     Scale(f32),
     Spawned,
     Resize(usize, usize, f32, f32),
+    FlushResize,
     SelectPress,
     SelectMove(f32, f32),
     SelectRelease,
@@ -125,6 +146,8 @@ pub enum Message {
     IpcToggle,
     Modifiers(iced::keyboard::Modifiers),
     Exit,
+    /// No-op — e.g. clipboard read returned nothing usable.
+    Nop,
 }
 
 impl Clone for Message {
@@ -135,6 +158,7 @@ impl Clone for Message {
             Message::Scale(s) => Message::Scale(*s),
             Message::Spawned => Message::Spawned,
             Message::Resize(c, r, w, h) => Message::Resize(*c, *r, *w, *h),
+            Message::FlushResize => Message::FlushResize,
             Message::SelectPress => Message::SelectPress,
             Message::SelectMove(x, y) => Message::SelectMove(*x, *y),
             Message::SelectRelease => Message::SelectRelease,
@@ -150,6 +174,7 @@ impl Clone for Message {
             Message::IpcToggle => Message::IpcToggle,
             Message::Modifiers(m) => Message::Modifiers(*m),
             Message::Exit => Message::Exit,
+            Message::Nop => Message::Nop,
         }
     }
 }
@@ -194,7 +219,9 @@ impl iced::Program for QuickProgram {
             |term| {
                 // Park the terminal in the handoff slot; the (clone-safe)
                 // Spawned message tells `update` to pick it up.
-                *PENDING_QUICK_TERM.lock().unwrap() = Some(Box::new(term));
+                *PENDING_QUICK_TERM
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = Some(Box::new(term));
                 Message::Spawned
             },
         );
@@ -219,6 +246,7 @@ impl iced::Program for QuickProgram {
                 menu_t: 0.0,
                 menu_pos: (8.0, 8.0),
                 mouse_pos: (8.0, 8.0),
+                resize_pending: false,
             },
             iced::Task::batch([ready, spawn]),
         )
@@ -253,7 +281,11 @@ impl iced::Program for QuickProgram {
                 return apply_configure(state);
             }
             Message::Spawned => {
-                if let Some(term) = PENDING_QUICK_TERM.lock().unwrap().take() {
+                if let Some(term) = PENDING_QUICK_TERM
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                {
                     state.term = Some(*term);
                 }
             }
@@ -266,9 +298,29 @@ impl iced::Program for QuickProgram {
                 if state.content_size != (w, h) {
                     state.content_size = (w, h);
                     if let Some(term) = &mut state.term {
+                        // The buffer resizes immediately; the PTY flush is
+                        // debounced — flushing one SIGWINCH per pixel while
+                        // an edge-drag floods Resize events garbles TUI
+                        // redraws (the main window applies the same 150ms
+                        // debounce for exactly this reason).
                         term.resize(cols, rows);
-                        term.flush_pty_resize();
+                        if !state.resize_pending {
+                            state.resize_pending = true;
+                            return Task::perform(
+                                async {
+                                    tokio::time::sleep(std::time::Duration::from_millis(150))
+                                        .await;
+                                },
+                                |_| Message::FlushResize,
+                            );
+                        }
                     }
+                }
+            }
+            Message::FlushResize => {
+                state.resize_pending = false;
+                if let Some(term) = &mut state.term {
+                    term.flush_pty_resize();
                 }
             }
             Message::SelectPress => {
@@ -314,7 +366,10 @@ impl iced::Program for QuickProgram {
                 state.menu_open = false;
                 return iced::clipboard::read().map(|s| {
                     s.map(|t| Message::Write(t.into_bytes()))
-                        .unwrap_or(Message::Exit)
+                        // Clipboard holds no text (image/file/failed read):
+                        // do nothing. The old code exited the whole quick
+                        // terminal here, killing the shell session with it.
+                        .unwrap_or(Message::Nop)
                 });
             }
             Message::SelectAll => {
@@ -324,6 +379,7 @@ impl iced::Program for QuickProgram {
                 }
             }
             Message::Pump => {
+                let mut alive = true;
                 if let Some(term) = &mut state.term {
                     term.pump();
                     // Drive the smooth cursor animation + blink — without
@@ -331,8 +387,16 @@ impl iced::Program for QuickProgram {
                     // app does the same in its AnimTick).
                     term.advance_cursor_anim(33.0);
                     term.tick_blink(true);
+                    // Shell exited (e.g. the user typed `exit`): close the
+                    // overlay instead of leaving a dead PTY that swallows
+                    // every keystroke silently.
+                    alive = term.is_alive();
+                }
+                if !alive {
+                    return self.update(state, Message::Exit);
                 }
             }
+            Message::Nop => {}
             Message::Tick => {
                 // Opacity fade animation (show/hide). The window is NEVER
                 // unmapped or moved off-screen, so KWin never plays its
@@ -650,15 +714,14 @@ fn ipc_stream() -> impl iced::futures::Stream<Item = Message> {
 }
 
 async fn ipc_task(mut out: iced::futures::channel::mpsc::Sender<Message>) {
-    use std::os::unix::net::UnixListener;
-
-    let runtime_dir =
-        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| SOCK_ENV_FALLBACK.to_string());
-    let path = std::path::Path::new(&runtime_dir).join("korterm-quick.sock");
-    let _ = std::fs::remove_file(&path);
-    let listener = match UnixListener::bind(&path) {
-        Ok(l) => l,
-        Err(_) => return,
+    // The listener was bound in `run()` — before iced started — as the
+    // atomic single-instance lock; pick it up here.
+    let listener = QUICK_LISTENER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
+    let Some(listener) = listener else {
+        return;
     };
     let _ = listener.set_nonblocking(true);
     loop {
@@ -787,18 +850,43 @@ pub fn run() -> iced::Result {
         std::env::set_var("XMODIFIERS", "@im=fcitx");
     }
 
-    let runtime_dir =
-        std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| SOCK_ENV_FALLBACK.to_string());
-    let sock_path = std::path::Path::new(&runtime_dir).join("korterm-quick.sock");
-
-    // Another instance running? Signal it to hide, then quit (toggle).
-    if UnixStream::connect(&sock_path).is_ok() {
-        eprintln!("[quick-child] connected to running instance — toggle sent");
+    let sock_path = quick_socket_path().unwrap_or_else(|| {
+        eprintln!("[quick-child] no usable socket directory — toggle IPC disabled");
         std::process::exit(0);
+    });
+
+    // Single-instance toggle: bind the socket BEFORE iced starts so the
+    // lock is atomic. (The old flow probed with connect() and only bound
+    // inside the IPC task seconds later — two instances launched in that
+    // window would both start and clobber each other's socket.)
+    let mut listener = None;
+    match std::os::unix::net::UnixListener::bind(&sock_path) {
+        Ok(l) => listener = Some(l),
+        Err(_) => {
+            // Bind failed: a live instance holds it, or a stale file from
+            // a crashed one. Toggle the live instance first.
+            if UnixStream::connect(&sock_path).is_ok() {
+                eprintln!("[quick-child] connected to running instance — toggle sent");
+                std::process::exit(0);
+            }
+            // Nobody listening → stale socket. Clean it and retry once;
+            // losing THAT bind means another primary won the race.
+            let _ = std::fs::remove_file(&sock_path);
+            match std::os::unix::net::UnixListener::bind(&sock_path) {
+                Ok(l) => listener = Some(l),
+                Err(_) => {
+                    if UnixStream::connect(&sock_path).is_ok() {
+                        eprintln!("[quick-child] lost bind race — toggle sent");
+                    }
+                    std::process::exit(0);
+                }
+            }
+        }
     }
     eprintln!("[quick-child] no running instance — starting new window");
-    // Stale socket from a crashed instance — clean it up.
-    let _ = std::fs::remove_file(&sock_path);
+    *QUICK_LISTENER
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = listener;
 
     // First run: open the system shortcut settings so the user can bind
     // the global hotkey (Wayland/X11 apps cannot register global hotkeys
@@ -821,10 +909,10 @@ pub fn run() -> iced::Result {
                  Type=Application\n\
                  Name=Korterm Quick Terminal\n\
                  Comment=Toggle the Korterm quick terminal overlay\n\
-                 Exec={} --quick\n\
+                 Exec=\"{}\" --quick\n\
                  Icon=utilities-terminal\n\
                  Categories=System;TerminalEmulator;\n",
-                exe.display()
+                exe.display().to_string().replace('%', "%%")
             );
             if let Some(dir) = desktop.parent() {
                 let _ = std::fs::create_dir_all(dir);

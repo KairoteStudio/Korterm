@@ -77,17 +77,21 @@ pub fn migrate_legacy() {
     let Some(legacy_dir) = dirs::config_dir().map(|d| d.join("kortina-terminal")) else {
         return;
     };
+
+    // The quick-terminal first-run hint marker migrates independently of
+    // the config file: a fresh install (no old config.conf) can still
+    // have a dismissed hint that must not be shown again.
+    let old_marker = legacy_dir.join("quick-hotkey-hint-shown");
+    let new_marker = new_dir.join("quick-hotkey-hint-shown");
+    if old_marker.exists() && !new_marker.exists() && std::fs::create_dir_all(&new_dir).is_ok() {
+        let _ = std::fs::copy(&old_marker, &new_marker);
+    }
+
     let new_conf = new_dir.join("config.conf");
     let old_conf = legacy_dir.join("config.conf");
-    if old_conf.exists() && !new_conf.exists()
-        && std::fs::create_dir_all(&new_dir).is_ok()
-            && std::fs::copy(&old_conf, &new_conf).is_ok()
-        {
-            let old_marker = legacy_dir.join("quick-hotkey-hint-shown");
-            if old_marker.exists() {
-                let _ = std::fs::copy(&old_marker, new_dir.join("quick-hotkey-hint-shown"));
-            }
-        }
+    if old_conf.exists() && !new_conf.exists() && std::fs::create_dir_all(&new_dir).is_ok() {
+        let _ = std::fs::copy(&old_conf, &new_conf);
+    }
 }
 
 /// Load the config; any missing/corrupt value keeps its default.

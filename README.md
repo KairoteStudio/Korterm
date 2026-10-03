@@ -84,6 +84,9 @@ korterm --quick
 
 所有快捷键都可在设置面板中改绑。
 
+> [!NOTE]
+> 终端 resize 只立即作用于当前活动标签;后台标签在你切换回去时自动补齐尺寸(vim 等全屏应用切回后自动重绘)。shell 退出时其标签会自动关闭。
+
 ## 配置
 
 配置文件位于 `~/.config/korterm/config.conf`,格式为简单的 `key = value` 行(未知键忽略,损坏值回退默认):
@@ -124,7 +127,7 @@ cargo clippy       # lint(当前零警告)
 | `animation.rs` | cubic-bezier 缓动、FLIP 补间、IME 输入区 |
 | `glow.rs` / `theme.rs` / `styles.rs` / `icons.rs` | 视觉层 |
 
-终端模拟与 PTY 由姊妹项目 [`Kortina.ICED/terminal`](../Kortina.ICED/terminal) 提供。
+终端模拟与 PTY(自研 VT 解析器)在 [`crates/terminal`](crates/terminal),矢量图标渲染在 [`crates/vector-icons`](crates/vector-icons),均随本仓库分发。
 
 ## 许可证
 

@@ -11,6 +11,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Required for softprops/action-gh-release to upload artifacts (the
+# default GITHUB_TOKEN is read-only without this).
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build release artifacts
@@ -39,16 +44,18 @@ jobs:
 
       - name: Pack tarball
         run: |
-          install -Dm755 target/release/korterm korterm-${GITHUB_REF_NAME}/korterm
-          cp -r assets korterm-${GITHUB_REF_NAME}/assets
-          cp README.md LICENSE install.sh korterm-${GITHUB_REF_NAME}/
-          tar czf korterm-${GITHUB_REF_NAME}-x86_64-linux.tar.gz korterm-${GITHUB_REF_NAME}
+          VERSION="${GITHUB_REF_NAME}"
+          install -Dm755 target/release/korterm "korterm-${VERSION}/korterm"
+          cp -r assets "korterm-${VERSION}/assets"
+          cp README.md LICENSE install.sh "korterm-${VERSION}/"
+          tar czf "korterm-${VERSION}-x86_64-linux.tar.gz" "korterm-${VERSION}"
 
       - name: Build .deb
         run: |
           cargo install cargo-deb --locked
           cargo deb --no-build
-          mv target/debian/*.deb korterm-${GITHUB_REF_NAME}-x86_64-linux.deb
+          VERSION="${GITHUB_REF_NAME}"
+          mv target/debian/*.deb "korterm-${VERSION}-x86_64-linux.deb"
 
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v2

@@ -2728,7 +2728,7 @@ fn title_cell_width(s: &str) -> usize {
 fn word_at_cell(term: &terminal::Terminal, cx: usize, vy: usize) -> String {
     let total = term.buf.lines.len();
     let offset = total.saturating_sub(term.buf.rows);
-    let line_idx = offset + vy;
+    let line_idx = offset.saturating_sub(term.view_offset) + vy;
     if line_idx >= total {
         return String::new();
     }

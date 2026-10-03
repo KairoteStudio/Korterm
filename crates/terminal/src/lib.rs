@@ -455,11 +455,15 @@ impl Terminal {
     /// Begin a new selection at the given viewport cell. The anchor is
     /// both the start and end — dragging later extends `end`.
     ///
-    /// Rows are stored as **absolute buffer line indices** (viewport row
-    /// + `view_offset`), so the selection stays glued to the text when
-    /// the user scrolls, instead of floating at a fixed screen position.
+    /// Rows are stored as **absolute buffer line indices** so the
+    /// selection stays glued to the text when the user scrolls,
+    /// instead of floating at a fixed screen position.
+    ///
+    /// Mapping: viewport row `vy` → absolute = (total - rows - view_offset) + vy.
     pub fn start_selection(&mut self, cx: usize, vy: usize) {
-        let line = self.view_offset + vy;
+        let total = self.buf.lines.len();
+        let offset = total.saturating_sub(self.buf.rows);
+        let line = offset.saturating_sub(self.view_offset) + vy;
         self.selection = Some(Selection {
             start: (cx, line),
             end: (cx, line),
@@ -471,7 +475,9 @@ impl Terminal {
     /// converted to an absolute line like in [`start_selection`].
     pub fn extend_selection(&mut self, cx: usize, vy: usize) {
         if let Some(sel) = &mut self.selection {
-            sel.end = (cx, self.view_offset + vy);
+            let total = self.buf.lines.len();
+            let offset = total.saturating_sub(self.buf.rows);
+            sel.end = (cx, offset.saturating_sub(self.view_offset) + vy);
         }
     }
 

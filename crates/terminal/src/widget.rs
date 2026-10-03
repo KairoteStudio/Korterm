@@ -287,9 +287,10 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
         if let Some(sel) = &self.term.selection {
             let (start, end) = normalize(*sel);
             let total = self.term.buf.lines.len();
-            let view = self.term.view_offset;
+            let offset = total.saturating_sub(self.term.buf.rows);
+            let view_start = offset.saturating_sub(self.term.view_offset);
             for vy in 0..self.term.buf.rows {
-                let line_idx = view + vy;
+                let line_idx = view_start + vy;
                 if line_idx < start.1 || line_idx > end.1 || line_idx >= total {
                     continue;
                 }

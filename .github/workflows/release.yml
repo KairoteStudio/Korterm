@@ -39,6 +39,16 @@ jobs:
       - name: cargo test
         run: cargo test --locked --release
 
+      - name: Verify tag matches package version
+        run: |
+          PKG_VERSION="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ "${GITHUB_REF_NAME}" != "${PKG_VERSION}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} != Cargo.toml version ${PKG_VERSION}"
+            echo "Bump version in Cargo.toml before tagging — otherwise the .deb"
+            echo "keeps the old version and apt refuses to upgrade it."
+            exit 1
+          fi
+
       - name: Build optimized binary
         run: cargo build --release --locked
 

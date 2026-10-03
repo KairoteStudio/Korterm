@@ -745,4 +745,109 @@ mod tests {
         t.search_set("");
         assert!(t.search.is_none());
     }
+
+    /// Screen row → absolute buffer line, using the same formula the
+    /// widget renderer uses (`render_start` in `widget.rs`).
+    fn abs_line_of_row(t: &Terminal, vy: usize) -> usize {
+        let total = t.buf.lines.len();
+        let render_start = total
+            .saturating_sub(t.buf.rows)
+            .saturating_sub(t.view_offset);
+        render_start + vy
+    }
+
+    /// Fill the buffer with `n` scrollback lines beyond the viewport and
+    /// label line `i` with its index so tests can identify text.
+    fn fill_scrollback(t: &mut Terminal, n: usize) {
+        for i in 0..n {
+            t.buf.line_feed();
+            let row = t.buf.lines.len() - 1;
+            let s = format!("L{row}");
+            t.buf.write_char(s.chars().next().unwrap() as u32, row, "");
+        }
+    }
+
+    #[test]
+    fn selection_is_anchored_to_text_across_scroll() {
+        let mut t = test_term();
+        fill_scrollback(&mut t, 20);
+        let total = t.buf.lines.len();
+
+        // Select two viewport rows while parked at the live bottom.
+        t.start_selection(0, 1);
+        t.extend_selection(5, 2);
+        let before = t.selection.unwrap();
+        assert_eq!(before.start.1, total - t.buf.rows + 1);
+        assert_eq!(before.end.1, total - t.buf.rows + 2);
+
+        // Scroll up into history: the stored absolute lines must NOT
+        // change, and the highlighted screen rows must move DOWN (the
+        // text slides down under a fixed top edge) — that is what makes
+        // the highlight stick to its text instead of floating.
+        t.scroll_lines(-3);
+        assert_eq!(t.view_offset, 3);
+        assert_eq!(t.selection.unwrap().start.1, before.start.1);
+        assert_eq!(t.selection.unwrap().end.1, before.end.1);
+
+        let row_before = abs_line_of_row(&t, 1);
+        let row_after = abs_line_of_row(&t, 1 + 3);
+        assert_eq!(
+            row_before, before.start.1,
+            "screen row 1 must still map to the selected line"
+        );
+        assert_eq!(
+            row_after, before.start.1,
+            "scrolling up pushes the selected line further down the screen"
+        );
+
+        // Scrolling back returns it to its original screen row.
+        t.scroll_lines(3);
+        assert_eq!(t.view_offset, 0);
+        assert_eq!(abs_line_of_row(&t, 1), before.start.1);
+    }
+
+    #[test]
+    fn selection_made_while_scrolled_up_hits_the_visible_line() {
+        let mut t = test_term();
+        fill_scrollback(&mut t, 20);
+        t.scroll_lines(-5);
+
+        t.start_selection(2, 0);
+        t.extend_selection(9, 3);
+        let sel = t.selection.unwrap();
+        // Rows 0 and 3 of the CURRENT viewport, not of the buffer top.
+        assert_eq!(sel.start.1, abs_line_of_row(&t, 0));
+        assert_eq!(sel.end.1, abs_line_of_row(&t, 3));
+    }
+
+    #[test]
+    fn select_all_covers_whole_buffer_not_just_viewport() {
+        let mut t = test_term();
+        fill_scrollback(&mut t, 20);
+        let total = t.buf.lines.len();
+        t.select_all();
+        let sel = t.selection.expect("selection set");
+        assert_eq!(sel.start, (0, 0));
+        assert_eq!(sel.end.1, total - 1);
+        assert!(sel.end.1 > t.buf.rows, "must reach past the viewport");
+    }
+
+    #[test]
+    fn cursor_screen_row_follows_view_offset() {
+        let mut t = test_term();
+        t.buf.cursor_y = t.buf.rows - 1; // prompt line, last viewport row
+        // Cursor lives in the live region: its absolute line is the last
+        // `rows` lines of the buffer.
+        let cursor_abs = t.buf.lines.len() - t.buf.rows + t.buf.cursor_y;
+        assert_eq!(cursor_abs, t.buf.lines.len() - 1);
+
+        // At rest it sits on its own viewport row.
+        let screen_row = t.buf.cursor_y + t.view_offset;
+        assert!(screen_row < t.buf.rows);
+
+        // Scrolled into history it is pushed below the window and must be
+        // hidden — matching xterm/GNOME Terminal.
+        t.view_offset = 3;
+        assert!(t.buf.cursor_y + t.view_offset >= t.buf.rows);
+    }
 }

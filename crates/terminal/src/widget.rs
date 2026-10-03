@@ -315,31 +315,30 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
             }
         }
 
-        // Draw cursor: maps buffer position to viewport so the cursor
-        // follows the visible text when scrolling, instead of being fixed
-        // to the bottom of the buffer.
+        // Draw cursor.
+        //
+        // `buf.cursor_y` is a **viewport row** inside the live region —
+        // the live region is the last `rows` lines of the buffer, while
+        // the viewport starts at `total - rows - view_offset`. So the
+        // cursor's screen row is `cursor_y + view_offset`: at rest that
+        // equals `cursor_y`, and once the user scrolls into history the
+        // cursor slides below the window and must not be drawn (this is
+        // what xterm/GNOME Terminal do).
         let state = self.term.cursor_render_state(self.focused);
         if !matches!(state, CursorRenderState::Hidden) {
-            let prev_view_y = self.term.prev_cursor.1.saturating_sub(self.term.view_offset);
-            let curr_view_y = self.term.buf.cursor_y.saturating_sub(self.term.view_offset);
-            let prev = (
-                self.term.prev_cursor.0,
-                prev_view_y,
-            );
-            let curr = (
-                self.term.buf.cursor_x,
-                curr_view_y,
-            );
-            let t = ease_out_cubic(self.term.cursor_anim_t);
-            let from_x = prev.0 as f32 * char_w;
-            let to_x = curr.0 as f32 * char_w;
-            let from_y = prev.1 as f32;
-            let to_y = curr.1 as f32;
-            let px = from_x + (to_x - from_x) * t;
-            let py = from_y + (to_y - from_y) * t;
+            let prev_y = self.term.prev_cursor.1 + self.term.view_offset;
+            let curr_y = self.term.buf.cursor_y + self.term.view_offset;
+            let rows = self.term.buf.rows;
+            // Only draw while the cursor line is inside the window.
+            if curr_y < rows {
+                let t = ease_out_cubic(self.term.cursor_anim_t);
+                let from_x = self.term.prev_cursor.0 as f32 * char_w;
+                let to_x = self.term.buf.cursor_x as f32 * char_w;
+                let from_y = prev_y as f32;
+                let to_y = curr_y as f32;
+                let px = from_x + (to_x - from_x) * t;
+                let py = from_y + (to_y - from_y) * t;
 
-            // Only draw cursor if it's currently visible in the viewport
-            if curr.1 < self.term.buf.rows {
                 let x = PAD_X + px;
                 let y = content_row_y(py);
                 let size = Size::new(char_w, CELL_H);

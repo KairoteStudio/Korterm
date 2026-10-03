@@ -45,7 +45,8 @@ jobs:
       - name: Verify tag matches package version
         run: |
           PKG_VERSION="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
-          if [ "${GITHUB_REF_NAME}" != "${PKG_VERSION}" ]; then
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "${TAG_VERSION}" != "${PKG_VERSION}" ]; then
             echo "::error::tag ${GITHUB_REF_NAME} != Cargo.toml version ${PKG_VERSION}"
             echo "Bump version in Cargo.toml before tagging — otherwise the .deb"
             echo "keeps the old version and apt refuses to upgrade it."

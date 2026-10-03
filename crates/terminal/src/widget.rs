@@ -315,11 +315,21 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
             }
         }
 
-        // Draw cursor
+        // Draw cursor: maps buffer position to viewport so the cursor
+        // follows the visible text when scrolling, instead of being fixed
+        // to the bottom of the buffer.
         let state = self.term.cursor_render_state(self.focused);
         if !matches!(state, CursorRenderState::Hidden) {
-            let prev = self.term.prev_cursor;
-            let curr = (self.term.buf.cursor_x, self.term.buf.cursor_y);
+            let prev_view_y = self.term.prev_cursor.1.saturating_sub(self.term.view_offset);
+            let curr_view_y = self.term.buf.cursor_y.saturating_sub(self.term.view_offset);
+            let prev = (
+                self.term.prev_cursor.0,
+                prev_view_y,
+            );
+            let curr = (
+                self.term.buf.cursor_x,
+                curr_view_y,
+            );
             let t = ease_out_cubic(self.term.cursor_anim_t);
             let from_x = prev.0 as f32 * char_w;
             let to_x = curr.0 as f32 * char_w;
@@ -328,24 +338,27 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
             let px = from_x + (to_x - from_x) * t;
             let py = from_y + (to_y - from_y) * t;
 
-            let x = PAD_X + px;
-            let y = content_row_y(py);
-            let size = Size::new(char_w, CELL_H);
+            // Only draw cursor if it's currently visible in the viewport
+            if curr.1 < self.term.buf.rows {
+                let x = PAD_X + px;
+                let y = content_row_y(py);
+                let size = Size::new(char_w, CELL_H);
 
-            match state {
-                CursorRenderState::Showing => {
-                    frame.fill_rectangle(Point::new(x, y), size, CURSOR);
+                match state {
+                    CursorRenderState::Showing => {
+                        frame.fill_rectangle(Point::new(x, y), size, CURSOR);
+                    }
+                    CursorRenderState::NoFocus => {
+                        frame.stroke_rectangle(
+                            Point::new(x, y),
+                            size,
+                            canvas::Stroke::default()
+                                .with_color(FG)
+                                .with_width(1.5),
+                        );
+                    }
+                    CursorRenderState::Hidden => {}
                 }
-                CursorRenderState::NoFocus => {
-                    frame.stroke_rectangle(
-                        Point::new(x, y),
-                        size,
-                        canvas::Stroke::default()
-                            .with_color(FG)
-                            .with_width(1.5),
-                    );
-                }
-                CursorRenderState::Hidden => {}
             }
         }
 

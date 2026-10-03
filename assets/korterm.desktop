@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Korterm
+GenericName=Terminal
+Comment=Fleet-style standalone terminal emulator
+Comment[zh_CN]=Fleet 风格的独立终端模拟器
+Exec=korterm
+TryExec=korterm
+Icon=korterm
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;prompt;command;commandline;终端;
+StartupWMClass=korterm
+X-KDE-StartupNotify=true

@@ -1,0 +1,59 @@
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build release artifacts
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies (X11/Wayland linking)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev wayland-protocols \
+            libxcb1-dev libxcb-cursor-dev libxcb-render0-dev \
+            libxcb-shape0-dev libxcb-xfixes0-dev libx11-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo test
+        run: cargo test --locked --release
+
+      - name: Build optimized binary
+        run: cargo build --release --locked
+
+      - name: Pack tarball
+        run: |
+          install -Dm755 target/release/korterm korterm-${GITHUB_REF_NAME}/korterm
+          cp -r assets korterm-${GITHUB_REF_NAME}/assets
+          cp README.md LICENSE install.sh korterm-${GITHUB_REF_NAME}/
+          tar czf korterm-${GITHUB_REF_NAME}-x86_64-linux.tar.gz korterm-${GITHUB_REF_NAME}
+
+      - name: Build .deb
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb --no-build
+          mv target/debian/*.deb korterm-${GITHUB_REF_NAME}-x86_64-linux.deb
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            korterm-*-x86_64-linux.tar.gz
+            korterm-*-x86_64-linux.deb
+          generate_release_notes: true

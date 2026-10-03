@@ -1755,7 +1755,8 @@ impl TerminalPanel {
         let est: f32 = self
             .terminals
             .iter()
-            .map(|t| 62.0 + title_cell_width(&t.display_title(0)) as f32 * cw)
+            .enumerate()
+            .map(|(idx, t)| 62.0 + title_cell_width(&t.display_title(idx)) as f32 * cw)
             .sum();
         let (ww, _) = self.window_size;
         // titlebar padding 2*12 + left group (~90) + right buttons (~132)

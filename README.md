@@ -4,25 +4,27 @@
 
 # Korterm
 
-**Fleet 风格的独立终端模拟器** — 用 Rust + [iced](https://github.com/iced-rs/iced) 从零打造的桌面终端,带 macOS "island" 视觉、可拖拽标签页和 Quake 式快捷下拉终端。
+**Fleet 风格的独立终端模拟器**
+技术栈:
+Rust
+[iced](https://github.com/iced-rs/iced)
 
 <div align="center"><img src="assets/icon-256.png" width="128" alt="Korterm 图标"/></div>
 
-## 特性
+## 展示
+### 首次启动:
+<div align="center"><img src="assets/Preview-default.png" alt="Korterm-常规"/></div>
 
-- **终端核心** — 内置 PTY(portable-pty)+ 自研 VT 解析器,输入回显、动态 resize、光标动画一应俱全
-- **标签页** — 水平标签 / 右侧边栏两种布局;拖拽重排(FLIP 滑动动画)、双击重命名、溢出自动收纳
-- **快捷终端** — `korterm --quick` 唤出 Quake 式顶部下拉终端,全局系统快捷键一键切换(X11/XWayland)
-- **中文输入** — 完整 IME 支持(preedit 内联显示),Wayland 与 XWayland 下的 fcitx5 均已适配
-- **搜索** — `Ctrl+F` 搜索终端缓冲区,高亮全部匹配并逐个跳转
-- **Ctrl+点击跳转** — 识别 URL、文件路径与 `path:line(:col)` 位置,一键 `xdg-open`
-- **设置面板** — 外观(状态栏 / 标签布局 / 侧栏宽度)、辉光颜色(HSV 取色器)、快捷键(捕获式重绑定 + 冲突检测),全部持久化
-- **Fleet 辉光** — 可自定义双色径向辉光背景与 24 帧补间动画系统(按需 60fps,空闲零唤醒)
+### 垂直侧边栏:
+<div align="center"><img src="assets/Preview-vertical-tab.png" alt="Korterm-垂直标签页"/></div>
+
+### 标签页过多时展开独立lable(用于移动窗口):
+<div align="center"><img src="assets/Preview-function-001.png" alt="Korterm-功能-001"/></div>
 
 ## 平台支持
 
 > [!NOTE]
-> Korterm 目前是 **Linux 专用**(X11 / XWayland)。快捷终端依赖 X11 的窗口定位与置顶能力。
+> Korterm 目前是 **Linux Only**(X11 / XWayland)。快捷终端依赖 X11 的窗口定位与置顶能力。
 
 ## 安装
 
@@ -57,7 +59,7 @@ cargo build --release     # 产物: target/release/korterm
 
 ### 主程序
 
-直接运行 `korterm`。无边框窗口、44px 自定义标题栏、红绿灯按钮,标签页常驻标题栏(或侧边栏)。
+直接运行 `korterm`。
 
 ### 快捷终端(Quake 模式)
 
@@ -69,6 +71,7 @@ korterm --quick
 
 按一次唤出(顶部半屏、置顶、淡入),再按一次收起。首次运行会自动安装 `.desktop` 条目并引导你打开系统快捷键设置。
 
+#### 快捷键可在设置面板中改绑。
 ### 默认快捷键
 
 | 操作 | 快捷键 |
@@ -82,7 +85,6 @@ korterm --quick
 | 下一个 / 上一个标签 | `Ctrl+Shift+→` / `Ctrl+Shift+←` |
 | 打开设置 | `Ctrl+Shift+S` |
 
-所有快捷键都可在设置面板中改绑。
 
 > [!NOTE]
 > 终端 resize 只立即作用于当前活动标签;后台标签在你切换回去时自动补齐尺寸(vim 等全屏应用切回后自动重绘)。shell 退出时其标签会自动关闭。
@@ -116,7 +118,7 @@ cargo clippy       # lint(当前零警告)
 
 ### 代码结构
 
-| 模块 | 职责 |
+| 模块 | 作用 |
 |---|---|
 | `terminal_panel.rs` | 核心状态机:会话管理、PTY 泵、输入路由、标签与菜单 |
 | `quick.rs` | Quake 式快捷终端(独立进程,socket 单实例 toggle) |
@@ -127,8 +129,25 @@ cargo clippy       # lint(当前零警告)
 | `animation.rs` | cubic-bezier 缓动、FLIP 补间、IME 输入区 |
 | `glow.rs` / `theme.rs` / `styles.rs` / `icons.rs` | 视觉层 |
 
-终端模拟与 PTY(自研 VT 解析器)在 [`crates/terminal`](crates/terminal),矢量图标渲染在 [`crates/vector-icons`](crates/vector-icons),均随本仓库分发。
+终端模拟与 PTY(自研 VT 解析器)在 [`crates/terminal`](crates/terminal),矢量图标渲染在 [`crates/vector-icons`](crates/vector-icons),为方便我自己开发,将会随本仓库发布,如后续依赖项目增加会拆分仓库。
 
 ## 许可证
 
 本项目以 [MPL-2.0](LICENSE)(Mozilla Public License v2.0)发布。
+
+
+### 贡献者
+
+感谢所有为这个项目做出贡献的开发者！
+
+<a href=" ">
+  <img src="https://contrib.rocks/image?repo=KairoteStudio/Korterm" />
+</a>
+
+---
+
+<div align="center">
+
+### 如果这个项目对你有帮助，请给我们一颗Star！
+
+**Made with ❤️ by Kairote Studio**

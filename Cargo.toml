@@ -5,7 +5,7 @@
 [package]
 name = "korterm"
 version = "1.0.0"
-description = "Korterm - Standalone Terminal Application"
+description = "Korterm | Modern Terminal Emulator"
 edition = "2021"
 license = "MPL-2.0"
 categories = ["command-line-utilities", "gui"]
@@ -29,14 +29,7 @@ vector-icons = { path = "crates/vector-icons" }
 maintainer = "Korterm Developers <korterm@localhost>"
 copyright = "2025, Korterm Developers"
 license-file = ["LICENSE", "0"]
-extended-description = """\
-Korterm is a standalone, Fleet-style terminal emulator built with iced. \
-It ships a custom titlebar with drag-reorder tabs (horizontal or sidebar), \
-a Quake-style quick terminal toggleable from a global system shortcut, \
-a full settings panel (appearance, glow colors, keybindings) persisted to \
-~/.config/korterm/config.conf, IME-aware input, search, and Ctrl+click \
-jump-to-file/URL. Terminal emulation and PTY handling come from the \
-sibling Kortina.ICED `terminal` crate. Linux (X11/XWayland) only."""
+extended-description = """Korterm is a standalone terminal emulator"""
 depends = "$auto"
 section = "utils"
 priority = "optional"

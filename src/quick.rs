@@ -859,9 +859,8 @@ pub fn run() -> iced::Result {
     // lock is atomic. (The old flow probed with connect() and only bound
     // inside the IPC task seconds later — two instances launched in that
     // window would both start and clobber each other's socket.)
-    let mut listener = None;
-    match std::os::unix::net::UnixListener::bind(&sock_path) {
-        Ok(l) => listener = Some(l),
+    let listener = match std::os::unix::net::UnixListener::bind(&sock_path) {
+        Ok(l) => Some(l),
         Err(_) => {
             // Bind failed: a live instance holds it, or a stale file from
             // a crashed one. Toggle the live instance first.
@@ -873,7 +872,7 @@ pub fn run() -> iced::Result {
             // losing THAT bind means another primary won the race.
             let _ = std::fs::remove_file(&sock_path);
             match std::os::unix::net::UnixListener::bind(&sock_path) {
-                Ok(l) => listener = Some(l),
+                Ok(l) => Some(l),
                 Err(_) => {
                     if UnixStream::connect(&sock_path).is_ok() {
                         eprintln!("[quick-child] lost bind race — toggle sent");
@@ -882,7 +881,7 @@ pub fn run() -> iced::Result {
                 }
             }
         }
-    }
+    };
     eprintln!("[quick-child] no running instance — starting new window");
     *QUICK_LISTENER
         .lock()

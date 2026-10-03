@@ -375,7 +375,7 @@ impl iced::Program for QuickProgram {
             Message::SelectAll => {
                 state.menu_open = false;
                 if let Some(term) = &mut state.term {
-                    term.select_all_visible();
+                    term.select_all();
                 }
             }
             Message::Pump => {

@@ -281,19 +281,21 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
             }
         }
 
-        // Draw selection highlight
+        // Draw selection highlight. Selection rows are absolute buffer
+        // lines; translate each viewport row into buffer space so the
+        // highlight moves WITH the text when the viewport scrolls.
         if let Some(sel) = &self.term.selection {
             let (start, end) = normalize(*sel);
             let total = self.term.buf.lines.len();
-            let offset = total.saturating_sub(self.term.buf.rows);
-            for vy in start.1..=end.1 {
-                let line_idx = offset + vy;
-                if line_idx >= total {
-                    break;
+            let view = self.term.view_offset;
+            for vy in 0..self.term.buf.rows {
+                let line_idx = view + vy;
+                if line_idx < start.1 || line_idx > end.1 || line_idx >= total {
+                    continue;
                 }
                 let line = &self.term.buf.lines[line_idx];
-                let cell_start = if vy == start.1 { start.0 } else { 0 };
-                let cell_end = if vy == end.1 {
+                let cell_start = if line_idx == start.1 { start.0 } else { 0 };
+                let cell_end = if line_idx == end.1 {
                     end.0
                 } else {
                     line.cells.len().saturating_sub(1)

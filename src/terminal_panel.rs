@@ -180,6 +180,8 @@ pub struct TerminalPanel {
     pub strip_base_h: f32,
     /// Horizontal scroll offset of the titlebar tab strip (px).
     pub tabs_scroll_x: f32,
+    /// Vertical scroll offset of the sidebar tab list (px).
+    pub sidebar_scroll_y: f32,
     /// Whether tabs overflow the titlebar (drag strip becomes available).
     pub tabs_overflow: bool,
     /// Inline tab-rename editor: (tab index, current draft).
@@ -351,6 +353,12 @@ pub enum Message {
     /// advances cursor animations, so it must never be used as a
     /// fallback — every keypress would visibly jerk the cursor.
     Nop,
+    /// Real scroll offset reported by the titlebar tab strip.
+    TitlebarScrolled(f32),
+    /// Real scroll offset reported by the sidebar tab list.
+    SidebarScrolled(f32),
+    /// Re-assert the saved tab-list scroll after a layout switch.
+    RestoreTabsScroll,
     TermPump,
     AnimTick,
     /// A terminal was spawned asynchronously (from `create_terminal`).
@@ -435,6 +443,9 @@ impl Clone for Message {
             Message::MainWindowReady(id) => Message::MainWindowReady(*id),
             Message::Tick => Message::Tick,
             Message::Nop => Message::Nop,
+            Message::TitlebarScrolled(x) => Message::TitlebarScrolled(*x),
+            Message::SidebarScrolled(y) => Message::SidebarScrolled(*y),
+            Message::RestoreTabsScroll => Message::RestoreTabsScroll,
             Message::TermPump => Message::TermPump,
             Message::AnimTick => Message::AnimTick,
             Message::TerminalSpawned { seq, title, base } => Message::TerminalSpawned {
@@ -521,6 +532,9 @@ impl std::fmt::Debug for Message {
             Message::MainWindowReady(id) => write!(f, "MainWindowReady({id:?})"),
             Message::Tick => write!(f, "Tick"),
             Message::Nop => write!(f, "Nop"),
+            Message::TitlebarScrolled(x) => write!(f, "TitlebarScrolled({x})"),
+            Message::SidebarScrolled(y) => write!(f, "SidebarScrolled({y})"),
+            Message::RestoreTabsScroll => write!(f, "RestoreTabsScroll"),
             Message::TermPump => write!(f, "TermPump"),
             Message::AnimTick => write!(f, "AnimTick"),
             Message::TerminalSpawned { seq, title, base, .. } => {
@@ -566,6 +580,7 @@ impl TerminalPanel {
             strip_extra_applied: 0.0,
             strip_base_h: 0.0,
             tabs_scroll_x: 0.0,
+            sidebar_scroll_y: 0.0,
             tabs_overflow: false,
             tab_rename: None,
             ime_preedit: String::new(),
@@ -715,24 +730,24 @@ impl TerminalPanel {
             Message::TitlebarScroll(delta) => {
                 // Plain vertical wheel does not scroll horizontal
                 // scrollables in iced (direction.align drops the y axis),
-                // so map it manually. Mirrors iced's -delta * 60 for lines.
+                // so map it manually. Use scroll_by so the scrollable
+                // itself clamps to the real content extent — the old
+                // clamp(0, ww) capped the strip at ~16 tabs on narrow
+                // windows.
                 let dx = match delta {
                     iced::mouse::ScrollDelta::Lines { y, .. } => -y * 60.0,
                     iced::mouse::ScrollDelta::Pixels { y, .. } => -y,
                 };
-                let (ww, _) = self.window_size;
-                eprintln!(
-                    "[tabs] wheel dx={dx:.0} -> offset={}",
-                    (self.tabs_scroll_x + dx).clamp(0.0, ww)
-                );
-                self.tabs_scroll_x = (self.tabs_scroll_x + dx).clamp(0.0, ww);
-                return iced::widget::operation::scroll_to(
+                return iced::widget::operation::scroll_by(
                     iced::widget::Id::new("titlebar-tabs"),
-                    iced::widget::scrollable::AbsoluteOffset {
-                        x: Some(self.tabs_scroll_x),
-                        y: None,
-                    },
+                    iced::widget::scrollable::AbsoluteOffset { x: dx, y: 0.0 },
                 );
+            }
+            Message::TitlebarScrolled(x) => {
+                self.tabs_scroll_x = x;
+            }
+            Message::SidebarScrolled(y) => {
+                self.sidebar_scroll_y = y;
             }
             Message::SidebarDragStart => {
                 self.sidebar_dragging = true;
@@ -1032,6 +1047,10 @@ impl TerminalPanel {
                 if idx < self.terminals.len() {
                     self.terminals.remove(idx);
                 }
+                // The context menu still points at the closed tab — dismiss
+                // it (animated close) so the user isn't left with a ghost
+                // menu that re-closes the next tab.
+                self.close_context_menu();
                 self.active_terminal = if self.terminals.is_empty() {
                     None
                 } else {
@@ -1206,6 +1225,46 @@ impl TerminalPanel {
                 self.close_actions_menu();
                 self.close_context_menu();
                 self.save_config();
+                // Tabs that never fit the horizontal strip were never
+                // laid out, so the FLIP tracker has no position for them.
+                // Seed one at the strip's right edge so they glide in
+                // with the rest instead of popping into the sidebar.
+                if self.term_tabs_vertical {
+                    let (ww, _) = self.window_size;
+                    let mut tracker = self.tab_tweens.borrow_mut();
+                    for term in &self.terminals {
+                        tracker.seed_missing(term.id as u64, (ww - 60.0, 6.0));
+                    }
+                }
+                // The freshly mounted scrollable has no state — re-assert
+                // the remembered offset for the new layout after it has
+                // been built (one frame later).
+                return Task::future(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    Message::RestoreTabsScroll
+                });
+            }
+            Message::RestoreTabsScroll => {
+                use iced::widget::scrollable::AbsoluteOffset;
+                if self.term_tabs_vertical {
+                    if self.sidebar_scroll_y > 0.0 {
+                        return iced::widget::operation::scroll_to(
+                            iced::widget::Id::new("sidebar-tabs"),
+                            AbsoluteOffset {
+                                x: None,
+                                y: Some(self.sidebar_scroll_y),
+                            },
+                        );
+                    }
+                } else if self.tabs_scroll_x > 0.0 {
+                    return iced::widget::operation::scroll_to(
+                        iced::widget::Id::new("titlebar-tabs"),
+                        AbsoluteOffset {
+                            x: Some(self.tabs_scroll_x),
+                            y: None,
+                        },
+                    );
+                }
             }
             Message::TermShowShellSelector => {
                 // Press again does NOT close — clicking outside or picking
@@ -1307,7 +1366,7 @@ impl TerminalPanel {
             Message::TermSelectAll => {
                 self.close_context_menu();
                 if let Some(term) = self.active_term_mut() {
-                    term.term.select_all_visible();
+                    term.term.select_all();
                 }
             }
             Message::ToggleTerminal => {}
@@ -1355,6 +1414,11 @@ impl TerminalPanel {
                 // sync all apply; it is bounds-safe.
                 let mut dead = Vec::new();
                 for (idx, session) in self.terminals.iter_mut().enumerate() {
+                    // Settings (and any other pseudo-session) has no PTY —
+                    // is_alive() is always false. Don't auto-close it.
+                    if session.kind == SessionKind::Settings {
+                        continue;
+                    }
                     if !session.term.is_alive() {
                         dead.push(idx);
                     }
@@ -1895,11 +1959,15 @@ impl TerminalPanel {
                     ));
                 }
                 let tabs_scroll = scrollable(tabs_col)
+                    .id(iced::widget::Id::new("sidebar-tabs"))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .direction(scrollable::Direction::Vertical(
                         scrollable::Scrollbar::new().width(4.0).scroller_width(4.0),
                     ))
+                    .on_scroll(|vp| {
+                        Message::SidebarScrolled(vp.absolute_offset().y)
+                    })
                     .style(|_t, _s| styles::scroll_style());
 
                 let tabs_panel = container(tabs_scroll)

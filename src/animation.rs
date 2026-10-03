@@ -144,6 +144,21 @@ impl TweenTracker {
         );
     }
 
+    /// Seed a tab's position only when the tracker has none — used before
+    /// a layout switch so never-laid-out (overflow) tabs still FLIP in.
+    pub fn seed_missing(&mut self, key: u64, at: (f32, f32)) {
+        self.tabs.entry(key).or_insert_with(|| Track {
+            bounds: Rectangle {
+                x: at.0,
+                y: at.1,
+                width: 0.0,
+                height: 0.0,
+            },
+            anim: None,
+            seen: Instant::now(),
+        });
+    }
+
     /// Last known layout position of a tab (window coordinates), used to
     /// anchor popups (e.g. the tab context menu) to the tab itself.
     pub fn below_of(&self, key: u64) -> Option<(f32, f32)> {

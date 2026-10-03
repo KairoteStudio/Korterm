@@ -258,6 +258,16 @@ impl Terminal {
         let dropped = std::mem::take(&mut self.buf.dropped);
         if dropped > 0 {
             self.view_offset = self.view_offset.saturating_sub(dropped);
+            // Keep the selection glued to its text: shift it along with
+            // the history that just scrolled out; drop it once fully gone.
+            if let Some(sel) = &mut self.selection {
+                if sel.start.1 < dropped && sel.end.1 < dropped {
+                    self.selection = None;
+                } else {
+                    sel.start.1 = sel.start.1.saturating_sub(dropped);
+                    sel.end.1 = sel.end.1.saturating_sub(dropped);
+                }
+            }
             if let Some(s) = &mut self.search {
                 let mut removed_before_current = 0usize;
                 let mut kept = Vec::with_capacity(s.matches.len());
@@ -444,18 +454,24 @@ impl Terminal {
 
     /// Begin a new selection at the given viewport cell. The anchor is
     /// both the start and end — dragging later extends `end`.
+    ///
+    /// Rows are stored as **absolute buffer line indices** (viewport row
+    /// + `view_offset`), so the selection stays glued to the text when
+    /// the user scrolls, instead of floating at a fixed screen position.
     pub fn start_selection(&mut self, cx: usize, vy: usize) {
+        let line = self.view_offset + vy;
         self.selection = Some(Selection {
-            start: (cx, vy),
-            end: (cx, vy),
+            start: (cx, line),
+            end: (cx, line),
         });
     }
 
     /// Extend the active selection's end to the given viewport cell.
-    /// No-op if no selection is active.
+    /// No-op if no selection is active. `vy` is a viewport row and is
+    /// converted to an absolute line like in [`start_selection`].
     pub fn extend_selection(&mut self, cx: usize, vy: usize) {
         if let Some(sel) = &mut self.selection {
-            sel.end = (cx, vy);
+            sel.end = (cx, self.view_offset + vy);
         }
     }
 
@@ -464,9 +480,10 @@ impl Terminal {
         self.selection = None;
     }
 
-    /// Select every visible cell (rows 0..rows, cols 0..cols).
-    pub fn select_all_visible(&mut self) {
-        let last_row = self.buf.rows.saturating_sub(1);
+    /// Select the entire buffer — scrollback included, not just the
+    /// visible viewport.
+    pub fn select_all(&mut self) {
+        let last_row = self.buf.lines.len().saturating_sub(1);
         let last_col = self.buf.cols.saturating_sub(1);
         self.selection = Some(Selection {
             start: (0, 0),
@@ -616,16 +633,16 @@ impl Terminal {
         };
         let (start, end) = normalize(sel);
         let total = self.buf.lines.len();
-        let offset = total.saturating_sub(self.buf.rows);
         let mut out = String::new();
-        for vy in start.1..=end.1 {
-            let line_idx = offset + vy;
+        // Selection rows are absolute buffer line indices — copy exactly
+        // that range regardless of where the viewport is right now.
+        for line_idx in start.1..=end.1 {
             if line_idx >= total {
                 break;
             }
             let line = &self.buf.lines[line_idx];
-            let cell_start = if vy == start.1 { start.0 } else { 0 };
-            let cell_end_exclusive = if vy == end.1 {
+            let cell_start = if line_idx == start.1 { start.0 } else { 0 };
+            let cell_end_exclusive = if line_idx == end.1 {
                 (end.0 + 1).min(line.cells.len())
             } else {
                 line.cells.len()

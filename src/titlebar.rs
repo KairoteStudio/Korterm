@@ -215,7 +215,10 @@ pub fn view(app: &TerminalPanel) -> iced::Element<'static, Message> {
             .height(Pixels(32.0))
             .direction(scrollable::Direction::Horizontal(
                 scrollable::Scrollbar::new().width(0.0).scroller_width(0.0),
-            )),
+            ))
+            .on_scroll(|vp| {
+                Message::TitlebarScrolled(vp.absolute_offset().x)
+            }),
         )
         .on_scroll(Message::TitlebarScroll)
         .into()

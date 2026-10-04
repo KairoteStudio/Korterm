@@ -115,6 +115,17 @@ pub struct Buffer {
     /// absolute line indices (search matches, `view_offset`) so they
     /// keep pointing at the same text after history is trimmed.
     pub dropped: usize,
+
+    /// True while the program owns the alternate screen (`ESC[?1049h`,
+    /// `?47h`, `?1047h`) — vim, top, htop, less and friends. Used to
+    /// tell "a program is running" apart from "the shell is at a
+    /// prompt", so closing a tab can warn first.
+    pub alt_screen: bool,
+
+    /// Shell-integration state (OSC 133). `true` right after the prompt
+    /// was drawn, `false` from the moment a command starts until the
+    /// next prompt. `starts_prompted` is the initial value.
+    pub at_prompt: bool,
 }
 
 impl Buffer {
@@ -132,6 +143,8 @@ impl Buffer {
             cur_attr: Attr::DEFAULT,
             cursor_visible: true,
             dropped: 0,
+            alt_screen: false,
+            at_prompt: true,
         };
         for _ in 0..rows {
             buf.lines.push(BufferLine::new(cols));

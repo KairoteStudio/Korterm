@@ -434,6 +434,7 @@ mod tests {
             pending_pty_resize: None,
             view_offset: 0,
             search: None,
+            shell_marks: false,
         }
     }
 

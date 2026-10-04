@@ -51,5 +51,18 @@ _korterm_load zsh-syntax-highlighting.zsh \
     /usr/local/share/zsh-syntax-highlighting \
     "$HOME/.local/share/zsh-syntax-highlighting"
 
+# --- 4. Prompt marks (OSC 133) ----------------------------------------
+# Korterm needs to know whether a command is still running before it
+# closes a tab on top of it: A marks the prompt, D the moment a command
+# starts. Other terminals ignore these; they are 4 bytes of escape
+# sequence and never reach the screen.
+autoload -Uz add-zsh-hook 2>/dev/null
+if (( $+functions[add-zsh-hook] )); then
+    _korterm_prompt_start() { printf '\033]133;A\007' }
+    _korterm_command_start() { printf '\033]133;D\007' }
+    add-zsh-hook precmd _korterm_prompt_start
+    add-zsh-hook preexec _korterm_command_start
+fi
+
 unfunction _korterm_load 2>/dev/null
 unset _korterm_zcompdump 2>/dev/null

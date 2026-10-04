@@ -178,7 +178,7 @@ impl InputHandler {
                         25 => buf.cursor_visible = true,  // DECTCEM — text cursor enable
                         1 => { /* DECCKM — application cursor keys; ignored */ }
                         2004 => { /* Bracketed paste mode; ignored */ }
-                        1049 => { /* Alt screen; ignored */ }
+                        1049 | 47 | 1047 => buf.alt_screen = true,
                         _ => {}
                     }
                 }
@@ -189,7 +189,7 @@ impl InputHandler {
                         25 => buf.cursor_visible = false,
                         1 => { /* DECCKM off */ }
                         2004 => { /* Bracketed paste off */ }
-                        1049 => { /* Alt screen off */ }
+                        1049 | 47 | 1047 => buf.alt_screen = false,
                         _ => {}
                     }
                 }
@@ -249,9 +249,24 @@ impl InputHandler {
         }
     }
 
-    fn osc(_buf: &mut Buffer, params: &[String], _data: &str) {
+    fn osc(buf: &mut Buffer, params: &[String], data: &str) {
         // OSC 0 / 2 = set window title — handled at the widget level.
         // OSC 4 / 104 = set / reset palette colour — not implemented yet.
-        let _ = params.first();
+        // OSC 133 = shell integration marks (final byte):
+        //   A = prompt about to be drawn, D = command is starting.
+        // These tell the app whether the shell is idle at a prompt or a
+        // foreground program owns the terminal.
+        match params.first().map(String::as_str) {
+            Some("133") => match data {
+                "A" => buf.at_prompt = true,
+                "D" | "B" => buf.at_prompt = false,
+                _ => {}
+            },
+            Some("104") => {
+                // OSC 104 n — reset palette entry; n is the colour spec.
+                let _ = data;
+            }
+            _ => {}
+        }
     }
 }

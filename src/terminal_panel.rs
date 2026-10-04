@@ -76,6 +76,15 @@ pub fn resolve_shell_path(pref: &str) -> String {
     }
 }
 
+/// What a close is waiting on confirmation for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CloseTarget {
+    /// The whole window.
+    Window,
+    /// One tab, by index at the time the prompt was raised.
+    Tab(usize),
+}
+
 /// What a tab hosts: a live terminal or the (single) settings page.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SessionKind {
@@ -237,6 +246,9 @@ pub struct TerminalPanel {
     pub shell_status: crate::shell_integration::Status,
     /// Result of the last enable/disable attempt, shown in that section.
     pub shell_notice: Option<String>,
+    /// Pending destructive close, shown as a confirmation dialog when a
+    /// program is still running in that terminal.
+    pub close_confirm: Option<CloseTarget>,
     /// Whether the sidebar resize handle is being dragged.
     pub sidebar_dragging: bool,
     /// Active settings section (left nav).
@@ -376,6 +388,9 @@ pub enum Message {
     TermCopy,
     TermPaste,
     TermSelectAll,
+    /// Confirm (or cancel) the pending close.
+    CloseConfirmAccept,
+    CloseConfirmCancel,
     /// A file/folder was dropped onto the window from a file manager.
     /// The path is shell-quoted and written to the focused PTY.
     FileDropped(std::path::PathBuf),
@@ -478,6 +493,8 @@ impl Clone for Message {
             Message::TermFlushPtyResize => Message::TermFlushPtyResize,
             Message::TermCopy => Message::TermCopy,
             Message::TermPaste => Message::TermPaste,
+            Message::CloseConfirmAccept => Message::CloseConfirmAccept,
+            Message::CloseConfirmCancel => Message::CloseConfirmCancel,
             Message::FileDropped(p) => Message::FileDropped(p.clone()),
             Message::ShellIntegrationEnable => Message::ShellIntegrationEnable,
             Message::ShellIntegrationDisable => Message::ShellIntegrationDisable,
@@ -572,6 +589,8 @@ impl std::fmt::Debug for Message {
             Message::TermFlushPtyResize => write!(f, "TermFlushPtyResize"),
             Message::TermCopy => write!(f, "TermCopy"),
             Message::TermPaste => write!(f, "TermPaste"),
+            Message::CloseConfirmAccept => write!(f, "CloseConfirmAccept"),
+            Message::CloseConfirmCancel => write!(f, "CloseConfirmCancel"),
             Message::FileDropped(p) => write!(f, "FileDropped({})", p.display()),
             Message::ShellIntegrationEnable => write!(f, "ShellIntegrationEnable"),
             Message::ShellIntegrationDisable => write!(f, "ShellIntegrationDisable"),
@@ -656,6 +675,7 @@ impl TerminalPanel {
             shell_status: crate::shell_integration::status(&resolve_shell_path(&cfg.shell)),
             term_default_shell: cfg.shell,
             shell_notice: None,
+            close_confirm: None,
             sidebar_dragging: false,
             settings_section: crate::settings::Section::Appearance,
             picker: None,
@@ -727,6 +747,13 @@ impl TerminalPanel {
             },
         );
         (panel, iced::Task::batch([init, spawn]))
+    }
+
+    /// `true` when the terminal in front has something running.
+    fn active_term_busy(&mut self) -> bool {
+        self.active_term_mut()
+            .map(|t| t.term.is_busy())
+            .unwrap_or(false)
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -1114,6 +1141,17 @@ impl TerminalPanel {
                 }
             }
             Message::TermClose(idx) => {
+                // Killing a running program (vim with unsaved edits, a
+                // build halfway through) should not happen on a stray
+                // click — ask first.
+                if self.close_confirm.is_none()
+                    && self.terminals.get(idx).map(|t| t.term.is_busy()).unwrap_or(false)
+                {
+                    self.close_context_menu();
+                    self.close_confirm = Some(CloseTarget::Tab(idx));
+                    return Task::none();
+                }
+                self.close_confirm = None;
                 if idx < self.terminals.len() {
                     self.terminals.remove(idx);
                 }
@@ -1491,8 +1529,33 @@ impl TerminalPanel {
             }
             Message::ToggleTerminal => {}
             Message::CloseWindow => {
+                if self.close_confirm.is_none() && self.active_term_busy() {
+                    self.close_confirm = Some(CloseTarget::Window);
+                    return Task::none();
+                }
+                self.close_confirm = None;
                 if let Some(id) = self.main_window {
                     return iced::window::close(id);
+                }
+            }
+            Message::CloseConfirmCancel => {
+                self.close_confirm = None;
+            }
+            Message::CloseConfirmAccept => {
+                let target = self.close_confirm.take();
+                match target {
+                    Some(CloseTarget::Window) => {
+                        if let Some(id) = self.main_window {
+                            return iced::window::close(id);
+                        }
+                    }
+                    Some(CloseTarget::Tab(idx)) => {
+                        // Force the close even if the tab still looks
+                        // busy — the user just confirmed it.
+                        self.close_confirm = None;
+                        return self.update(Message::TermClose(idx));
+                    }
+                    None => {}
                 }
             }
             Message::MinimizeWindow => {
@@ -2290,6 +2353,66 @@ impl TerminalPanel {
                 .padding([4.0, 8.0])
                 .align_x(Horizontal::Right)
                 .align_y(Vertical::Top),
+            );
+        }
+
+        // "A program is still running" confirmation. Sits above every
+        // other layer, and the shield swallows clicks so nothing behind
+        // it reacts while the dialog is up.
+        if let Some(target) = self.close_confirm {
+            let (title, body) = match target {
+                CloseTarget::Window => (
+                    "关闭 Korterm？",
+                    "当前终端里还有程序在运行，关闭会直接终止它。",
+                ),
+                CloseTarget::Tab(_) => (
+                    "关闭标签页？",
+                    "这个终端里还有程序在运行，关闭会直接终止它。",
+                ),
+            };
+            let panel = container(
+                column![
+                    text(title).size(13.0).color(theme::TEXT),
+                    text(body).size(11.0).color(theme::DIM),
+                    row![
+                        button(text("取消").size(12.0).color(theme::TEXT))
+                            .padding([6.0, 14.0])
+                            .on_press(Message::CloseConfirmCancel)
+                            .style(crate::styles::dialog_button(false)),
+                        button(text("仍然关闭").size(12.0).color(theme::BG_PRIMARY))
+                            .padding([6.0, 14.0])
+                            .on_press(Message::CloseConfirmAccept)
+                            .style(crate::styles::dialog_button(true)),
+                    ]
+                    .spacing(8.0),
+                ]
+                .spacing(10.0)
+                .width(Length::Fill),
+            )
+            .width(Pixels(300.0))
+            .padding([16.0, 18.0])
+            .style(|_t| iced::widget::container::Style {
+                background: Some(iced::Background::Color(theme::BG_PANEL)),
+                border: iced::Border {
+                    color: theme::BORDER,
+                    width: 1.0,
+                    radius: iced::border::Radius::from(12.0),
+                },
+                ..Default::default()
+            });
+
+            layered = layered.push(
+                mouse_area(container(iced::widget::Space::new())
+                    .width(Length::Fill)
+                    .height(Length::Fill))
+                .on_press(Message::CloseConfirmCancel),
+            );
+            layered = layered.push(
+                container(panel)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
             );
         }
 

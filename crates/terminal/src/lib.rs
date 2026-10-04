@@ -59,6 +59,10 @@ pub struct Terminal {
     pub view_offset: usize,
     /// Active search (query + all matches + current match index).
     pub search: Option<Search>,
+    /// `true` once OSC 133 prompt marks have been seen for this session.
+    /// Until then [`Terminal::is_busy`] falls back to cursor heuristics
+    /// instead of trusting an `at_prompt` default.
+    pub shell_marks: bool,
 }
 
 /// A single search hit: absolute line index + visual column range.
@@ -96,6 +100,7 @@ impl Clone for Terminal {
             pending_pty_resize: self.pending_pty_resize,
             view_offset: self.view_offset,
             search: self.search.clone(),
+            shell_marks: self.shell_marks,
         }
     }
 }
@@ -144,6 +149,7 @@ impl Terminal {
             pending_pty_resize: None,
             view_offset: 0,
             search: None,
+            shell_marks: false,
         }
     }
 
@@ -170,6 +176,7 @@ impl Terminal {
             pending_pty_resize: None,
             view_offset: 0,
             search: None,
+            shell_marks: false,
         };
         match PtySession::spawn_with(cols as u16, rows as u16, program, cwd) {
             Ok(session) => term.pty = Some(session),
@@ -214,6 +221,7 @@ impl Terminal {
                 pending_pty_resize: None,
                 view_offset: 0,
                 search: None,
+                shell_marks: false,
             };
             match PtySession::spawn_with_async(
                 cols as u16,
@@ -247,11 +255,36 @@ impl Terminal {
         if data.is_empty() {
             return false;
         }
+        self.feed_output(&data);
+        // Auto-scroll unless the user is reading history; returns true so
+        // the caller knows something changed.
+        self.buf.cursor_x != self.prev_cursor.0 || self.buf.cursor_y != self.prev_cursor.1
+    }
+
+    /// Parse a chunk of shell output into the buffer.
+    ///
+    /// Split out of [`Terminal::pump`] so the parse path (escape
+    /// sequences, scrollback trimming, OSC 133 prompt marks) is testable
+    /// without a live PTY.
+    pub fn feed_output(&mut self, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
         // Capture the cursor position before processing so we can detect
         // movement and start the smooth-move animation.
         let prev = (self.buf.cursor_x, self.buf.cursor_y);
-        let actions = self.parser.feed(&data);
+        let actions = self.parser.feed(data);
         handler::InputHandler::apply(&mut self.buf, &actions);
+        // OSC 133 prompt marks are the shell telling us whether a command
+        // is running. Remember that this session speaks the protocol, so
+        // `is_busy` can trust `at_prompt` instead of guessing.
+        if !self.shell_marks
+            && actions.iter().any(|a| {
+                matches!(a, parser::Action::Osc { params, .. } if params.first().map(String::as_str) == Some("133"))
+            })
+        {
+            self.shell_marks = true;
+        }
         // Scrollback lines were trimmed from the top while parsing this
         // batch — shift absolute line indices (viewport offset, search
         // matches) so they keep pointing at the same text.
@@ -304,7 +337,6 @@ impl Terminal {
             self.cursor_blink_visible = true;
             self.last_blink = std::time::Instant::now();
         }
-        true
     }
 
     /// Send keyboard input to the shell.
@@ -450,6 +482,23 @@ impl Terminal {
         } else {
             CursorRenderState::Hidden
         }
+    }
+
+    /// Whether a foreground program appears to still be running, i.e.
+    /// closing this terminal right now would kill something.
+    ///
+    /// Three signals, strongest first:
+    /// 1. **Alternate screen** — vim/top/htop/less own the display.
+    /// 2. **OSC 133 marks** — the shell integration reports "command
+    ///    started" (`D`) and never sent a prompt again.
+
+    ///
+    /// Deliberately no guesswork: without marks, "is something running?"
+    /// cannot be answered reliably, and a false positive would nag the
+    /// user on every close. Full-screen programs are still caught by the
+    /// alternate-screen flag, which every TUI sets.
+    pub fn is_busy(&self) -> bool {
+        self.buf.alt_screen || (self.shell_marks && !self.buf.at_prompt)
     }
 
     /// Begin a new selection at the given viewport cell. The anchor is
@@ -754,6 +803,7 @@ mod tests {
             pending_pty_resize: None,
             view_offset: 0,
             search: None,
+            shell_marks: false,
         }
     }
 
@@ -935,5 +985,106 @@ mod path_quote_tests {
                 "shell did not reproduce {raw}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod busy_tests {
+    use super::*;
+
+    fn term() -> Terminal {
+        Terminal {
+            buf: Buffer::new(80, 6, 100),
+            parser: Parser::new(),
+            pty: None,
+            title: String::new(),
+            prev_cursor: (0, 0),
+            cursor_anim_t: 1.0,
+            cursor_anim_active: false,
+            cursor_blink_visible: true,
+            last_blink: std::time::Instant::now(),
+            selection: None,
+            pending_pty_resize: None,
+            view_offset: 0,
+            search: None,
+            shell_marks: false,
+        }
+    }
+
+    fn feed(t: &mut Terminal, bytes: &[u8]) {
+        t.feed_output(bytes);
+    }
+
+    #[test]
+    fn idle_shell_is_not_busy() {
+        let mut t = term();
+        feed(&mut t, b"$ ");
+        assert!(!t.is_busy(), "a fresh shell is idle");
+    }
+
+    #[test]
+    fn alternate_screen_means_busy() {
+        let mut t = term();
+        // vim/top/htop switch to the alternate screen.
+        feed(&mut t, b"\x1b[?1049h");
+        assert!(t.buf.alt_screen);
+        assert!(t.is_busy());
+        feed(&mut t, b"\x1b[?1049l");
+        assert!(!t.buf.alt_screen);
+        assert!(!t.is_busy());
+    }
+
+    #[test]
+    fn prompt_marks_drive_busy_state() {
+        let mut t = term();
+        // Prompt (A), then the user runs something (D).
+        feed(&mut t, b"\x1b]133;A\x07$ ");
+        assert!(t.shell_marks, "OSC 133 marks must switch the session to trusting them");
+        assert!(!t.is_busy());
+
+        feed(&mut t, b"\x1b]133;D\x07");
+        assert!(t.is_busy(), "command running");
+
+        // …until the next prompt comes back.
+        feed(&mut t, b"\x1b]133;A\x07");
+        assert!(!t.is_busy());
+    }
+
+    #[test]
+    fn marks_win_over_the_cursor_heuristic() {
+        let mut t = term();
+        feed(&mut t, b"\x1b]133;A\x07");
+        // Output that leaves the cursor above the tail would fool the
+        // fallback heuristic, but marks are authoritative.
+        for _ in 0..3 {
+            feed(&mut t, b"line\r\n");
+        }
+        feed(&mut t, b"\x1b]133;A\x07");
+        assert!(!t.is_busy(), "prompt mark says idle even mid-stream");
+
+        feed(&mut t, b"\x1b]133;D\x07");
+        assert!(t.is_busy(), "command mark says busy even at the tail");
+    }
+
+    #[test]
+    fn without_marks_we_do_not_guess() {
+        let mut t = term();
+        // Output without marks could be a running command or a finished
+        // one; Korterm must not nag, so it reports idle.
+        feed(&mut t, b"line one\r\nline two");
+        assert!(!t.is_busy());
+        // …but a full-screen program is still detected, because every TUI
+        // switches to the alternate screen regardless of shell plugins.
+        feed(&mut t, b"\x1b[?1049h");
+        assert!(t.is_busy());
+    }
+
+    #[test]
+    fn idle_shell_is_not_busy_after_prompt_marks_arrive() {
+        let mut t = term();
+        feed(&mut t, b"\x1b]133;A\007$ ");
+        assert!(!t.is_busy());
+        feed(&mut t, b"ls\r\nfile\r\n\x1b]133;A\007");
+        assert!(!t.is_busy());
     }
 }

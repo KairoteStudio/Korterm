@@ -991,7 +991,7 @@ fn shell_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
 
     rows = rows.push(
         container(
-            text("启用后 Korterm 会写入 ~/.config/korterm/shell-integration/ 并在你的 shell 配置末尾加载它；首次修改前会自动备份，可随时移除。")
+            text("启用后 Korterm 会写入 ~/.config/korterm/shell-integration/ 并在你的 shell 配置末尾加载它；首次修改前会自动备份，可随时移除。启用后终端能感知命令的开始与结束，关闭标签页或窗口前会先确认。")
                 .size(11.0)
                 .color(theme::DIM),
         )

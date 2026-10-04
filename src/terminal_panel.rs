@@ -295,6 +295,8 @@ pub struct TerminalPanel {
     /// Shell dropdown menu state (appearance section).
     pub shell_menu_open: bool,
     pub shell_menu_anim_t: f32,
+    /// Shell dropdown close animation in progress.
+    pub shell_menu_closing: bool,
     /// Color picker popover entrance animation progress.
     pub picker_anim_t: f32,
     /// iOS-toggle animation progress per switch ([statusbar, vertical]).
@@ -317,6 +319,10 @@ pub struct TerminalPanel {
 }
 
 pub enum Message {
+    /// A raw key press plus whether a widget had already consumed it.
+    /// Resolved in `update()` — not in the listener — because the escape
+    /// sequence a key maps to depends on the terminal's DECCKM mode.
+    KeyPress(iced::keyboard::Event, iced::event::Status),
     TermNew,
     TermNewShell(String),
     TermClose(usize),
@@ -480,6 +486,7 @@ pub enum Message {
 impl Clone for Message {
     fn clone(&self) -> Self {
         match self {
+            Message::KeyPress(k, s) => Message::KeyPress(k.clone(), *s),
             Message::TermNew => Message::TermNew,
             Message::TermNewShell(s) => Message::TermNewShell(s.clone()),
             Message::TermClose(i) => Message::TermClose(*i),
@@ -586,6 +593,7 @@ impl Clone for Message {
 impl std::fmt::Debug for Message {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Message::KeyPress(..) => write!(f, "KeyPress(..)"),
             Message::TermNew => write!(f, "TermNew"),
             Message::TermNewShell(s) => write!(f, "TermNewShell({s})"),
             Message::TermClose(i) => write!(f, "TermClose({i})"),
@@ -761,6 +769,7 @@ impl TerminalPanel {
             settings_anim_t: 0.0,
             shell_menu_open: false,
             shell_menu_anim_t: 0.0,
+            shell_menu_closing: false,
             picker_anim_t: 0.0,
             // Settings toggles start at the restored config values, not
             // hardcoded "on" — otherwise the switches visibly snap when
@@ -933,7 +942,7 @@ impl TerminalPanel {
         );
         rows = rows.push(
             text(format!(
-                "检测到当前 Shell：{} · {}",
+                "检测到当前 Shell：{} {}",
                 st.shell_display, shell_name
             ))
             .size(12.0)
@@ -1048,6 +1057,15 @@ impl TerminalPanel {
         // Mirror the keymap for the capture-free keyboard listener.
         crate::keybinds::sync_live(&self.keybinds, self.keybind_capture);
         match message {
+            // Key presses are resolved here rather than in the event
+            // listener because the escape sequence depends on the active
+            // terminal's DECCKM state, which only `update` can read.
+            Message::KeyPress(k, status) => {
+                let app_cursor_keys = self
+                    .active_term()
+                    .is_some_and(|t| t.term.buf.application_cursor_keys);
+                return self.update(keyboard_event_to_message(&k, status, app_cursor_keys));
+            }
             Message::TermNew => {
                 self.close_shell_selector();
                 self.close_context_menu();
@@ -1767,7 +1785,7 @@ impl TerminalPanel {
                 let shell = resolve_shell_path(&self.term_default_shell);
                 self.shell_notice =
                     match crate::shell_integration::enable(&shell) {
-                        Ok(()) => Some("已启用 · 新开的标签页生效".into()),
+                        Ok(()) => Some("已启用 新开的标签页生效".into()),
                         Err(e) => Some(format!("启用失败：{e}")),
                     };
                 self.shell_status = crate::shell_integration::status(&shell);
@@ -1775,7 +1793,7 @@ impl TerminalPanel {
             Message::ShellIntegrationDisable => {
                 let shell = resolve_shell_path(&self.term_default_shell);
                 self.shell_notice = match crate::shell_integration::disable(&shell) {
-                    Ok(()) => Some("已移除 · 新开的标签页生效".into()),
+                    Ok(()) => Some("已移除 新开的标签页生效".into()),
                     Err(e) => Some(format!("移除失败：{e}")),
                 };
                 self.shell_status = crate::shell_integration::status(&shell);
@@ -1795,12 +1813,12 @@ impl TerminalPanel {
             Message::BackendUseX11 => {
                 self.x11_backend = true;
                 self.save_config();
-                self.shell_notice = Some("已切换到 X11 后端 · 重启 Korterm 后生效".into());
+                self.shell_notice = Some("已切换到 X11 后端 重启 Korterm 后生效".into());
             }
             Message::BackendUseWayland => {
                 self.x11_backend = false;
                 self.save_config();
-                self.shell_notice = Some("已恢复 Wayland 后端 · 重启 Korterm 后生效".into());
+                self.shell_notice = Some("已恢复 Wayland 后端 重启 Korterm 后生效".into());
             }
             Message::FileDropped(path) => {
                 // A file/folder dragged in from the file manager inserts
@@ -1837,9 +1855,15 @@ impl TerminalPanel {
             }
             Message::SettingsShellMenuToggle => {
                 self.settings_shell_menu_open = !self.settings_shell_menu_open;
+                if self.settings_shell_menu_open {
+                    self.shell_menu_anim_t = 0.0;
+                }
             }
             Message::SettingsShellMenuClose => {
-                self.settings_shell_menu_open = false;
+                if self.settings_shell_menu_open {
+                    self.settings_shell_menu_open = false;
+                    self.shell_menu_closing = true;
+                }
             }
             Message::OpenWelcome => {
                 if self.first_run_done || self.welcome_window.is_some() {
@@ -2015,6 +2039,18 @@ impl TerminalPanel {
                     if self.settings_anim_t < crate::animation::MENU_ANIM_MS {
                         self.settings_anim_t = (self.settings_anim_t + dt_ms)
                             .min(crate::animation::MENU_ANIM_MS);
+                    }
+                    if self.settings_shell_menu_open
+                        && self.shell_menu_anim_t < crate::animation::MENU_ANIM_MS
+                    {
+                        self.shell_menu_anim_t = (self.shell_menu_anim_t + dt_ms)
+                            .min(crate::animation::MENU_ANIM_MS);
+                    }
+                    if self.shell_menu_closing {
+                        self.shell_menu_anim_t = (self.shell_menu_anim_t - dt_ms).max(0.0);
+                        if self.shell_menu_anim_t <= 0.0 {
+                            self.shell_menu_closing = false;
+                        }
                     }
                     if self.picker.is_some()
                         && self.picker_anim_t < crate::animation::MENU_ANIM_MS
@@ -2612,7 +2648,14 @@ impl TerminalPanel {
                 crate::animation::MENU_ANIM_MS
             };
             layered = layered.push(
-                container(animated_menu(shell_selector_panel(), 200.0, 142.0, t, true, false))
+                container(animated_menu(
+                    shell_selector_panel(),
+                    WIDE_MENU_W,
+                    menu_height(SHELL_SELECTOR_ROWS, true),
+                    t,
+                    true,
+                    false,
+                ))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding([2.0, 8.0])
@@ -2621,7 +2664,14 @@ impl TerminalPanel {
             );
         } else if let Some(t) = self.menu_closing.shell {
             layered = layered.push(
-                container(animated_menu(shell_selector_panel(), 200.0, 142.0, t, true, true))
+                container(animated_menu(
+                    shell_selector_panel(),
+                    WIDE_MENU_W,
+                    menu_height(SHELL_SELECTOR_ROWS, true),
+                    t,
+                    true,
+                    true,
+                ))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding([2.0, 8.0])
@@ -2638,7 +2688,14 @@ impl TerminalPanel {
                 crate::animation::MENU_ANIM_MS
             };
             layered = layered.push(
-                container(animated_menu(actions_menu_panel(self), 200.0, 126.0, t, true, false))
+                container(animated_menu(
+                    actions_menu_panel(self),
+                    WIDE_MENU_W,
+                    menu_height(ACTIONS_ROWS, false),
+                    t,
+                    true,
+                    false,
+                ))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding([2.0, 8.0])
@@ -2647,7 +2704,14 @@ impl TerminalPanel {
             );
         } else if let Some(t) = self.menu_closing.actions {
             layered = layered.push(
-                container(animated_menu(actions_menu_panel(self), 200.0, 126.0, t, true, true))
+                container(animated_menu(
+                    actions_menu_panel(self),
+                    WIDE_MENU_W,
+                    menu_height(ACTIONS_ROWS, false),
+                    t,
+                    true,
+                    true,
+                ))
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .padding([2.0, 8.0])
@@ -2809,7 +2873,10 @@ impl TerminalPanel {
                     || self.toggle_progress[0] != self.toggle_anim_target[0] as f32
                     || self.toggle_progress[1] != self.toggle_anim_target[1] as f32
                     || (self.picker.is_some()
-                        && self.picker_anim_t < crate::animation::MENU_ANIM_MS)))
+                        && self.picker_anim_t < crate::animation::MENU_ANIM_MS)
+                    || (self.settings_shell_menu_open
+                        && self.shell_menu_anim_t < crate::animation::MENU_ANIM_MS)
+                    || self.shell_menu_closing))
             || self.strip_anim_t > 0.0
             || (self.tabs_overflow && (self.titlebar_hover_x.is_some() || self.titlebar_grip_hover))
         {
@@ -2827,7 +2894,7 @@ impl TerminalPanel {
             (_, Event::Window(iced::window::Event::FileDropped(path))) => {
                 Some(Message::FileDropped(path.clone()))
             }
-            (_, Event::Keyboard(k)) => Some(keyboard_event_to_message(k, status)),
+            (_, Event::Keyboard(k)) => Some(Message::KeyPress(k.clone(), status)),
             (
                 _,
                 Event::InputMethod(iced::advanced::input_method::Event::Commit(content)),
@@ -2985,7 +3052,7 @@ fn shell_selector_panel() -> iced::Element<'static, Message> {
     }
 
     container(items)
-        .width(Pixels(200.0))
+        .width(Pixels(WIDE_MENU_W))
         .style(|_t| iced::widget::container::Style {
             background: Some(iced::Background::Color(theme::BG_PRIMARY)),
             border: iced::Border {
@@ -3011,7 +3078,7 @@ fn actions_menu_panel(app: &TerminalPanel) -> iced::Element<'static, Message> {
     items = items.push(menu_item(Icon::X, "关闭所有终端", Message::TermCloseAll));
 
     container(items)
-        .width(Pixels(200.0))
+        .width(Pixels(WIDE_MENU_W))
         .style(|_t| iced::widget::container::Style {
             background: Some(iced::Background::Color(theme::BG_PRIMARY)),
             border: iced::Border {
@@ -3167,6 +3234,42 @@ fn animated_menu(
 // Terminal right-click context menu
 // =============================================================================
 
+/// Menu metrics — every menu below is laid out as a fixed-size box that the
+/// panel is clipped into (see [`animated_menu`]), so a box must be exactly
+/// the panel's natural size: a taller one paints an empty strip below the
+/// last row, a shorter one clips that row and the panel's bottom border.
+///
+/// iced lays text out at 1.3× the font size by default (`LineHeight`), and a
+/// row is its label plus the row padding — the 14px icon is never the taller
+/// of the two.
+const MENU_LABEL: f32 = 12.0;
+const MENU_HEADING: f32 = 11.0;
+const MENU_LINE_H: f32 = 1.3;
+const MENU_ITEM_PAD_Y: f32 = 6.0;
+const MENU_SPACING: f32 = 2.0;
+const MENU_PAD_Y: f32 = 6.0;
+
+/// Natural height of a menu panel: `rows` label rows, the gaps between them,
+/// the panel padding and — when `heading` is set — the 11px caption above
+/// the rows (which contributes one extra gap).
+fn menu_height(rows: usize, heading: bool) -> f32 {
+    let row = MENU_LABEL * MENU_LINE_H + MENU_ITEM_PAD_Y * 2.0;
+    let gaps = MENU_SPACING * rows.saturating_sub(1) as f32;
+    let head = if heading { MENU_HEADING * MENU_LINE_H + MENU_SPACING } else { 0.0 };
+    rows as f32 * row + gaps + head + MENU_PAD_Y * 2.0
+}
+
+// Row counts per menu — must match what the panel builders push.
+const SHELL_SELECTOR_ROWS: usize = 4; // plus the caption
+const ACTIONS_ROWS: usize = 4;
+const CONTEXT_ROWS_TERMINAL: usize = 5;
+const CONTEXT_ROWS_TAB: usize = 2;
+
+// Panel widths (the animated box uses the same numbers).
+const WIDE_MENU_W: f32 = 200.0; // shell selector + actions menu
+const CONTEXT_W_TERMINAL: f32 = 180.0;
+const CONTEXT_W_TAB: f32 = 150.0;
+
 /// Text-only menu item (used by the terminal context menu — no icons).
 fn menu_item_text(label: &str, msg: Message) -> iced::Element<'static, Message> {
     button(
@@ -3187,12 +3290,21 @@ fn menu_item_text(label: &str, msg: Message) -> iced::Element<'static, Message> 
     .into()
 }
 
+/// Context menu panel width (the animated box must clip at the same width).
+fn context_menu_width(kind: MenuCtx) -> f32 {
+    match kind {
+        MenuCtx::Terminal => CONTEXT_W_TERMINAL,
+        MenuCtx::Tab(_) => CONTEXT_W_TAB,
+    }
+}
+
 /// Context menu natural size per kind (for the expand animation).
 fn context_menu_size(kind: MenuCtx) -> (f32, f32) {
-    match kind {
-        MenuCtx::Terminal => (180.0, 158.0),
-        MenuCtx::Tab(_) => (150.0, 66.0),
-    }
+    let rows = match kind {
+        MenuCtx::Terminal => CONTEXT_ROWS_TERMINAL,
+        MenuCtx::Tab(_) => CONTEXT_ROWS_TAB,
+    };
+    (context_menu_width(kind), menu_height(rows, false))
 }
 
 fn context_menu_panel(
@@ -3220,7 +3332,7 @@ fn context_menu_panel(
     }
 
     container(items)
-        .width(Pixels(180.0))
+        .width(Pixels(context_menu_width(kind)))
         .style(|_t| iced::widget::container::Style {
             background: Some(iced::Background::Color(theme::BG_PRIMARY)),
             border: iced::Border {
@@ -3503,15 +3615,19 @@ fn create_terminal(app: &mut TerminalPanel, shell: Option<&str>) -> Task<Message
 }
 
 fn compute_term_grid(app: &TerminalPanel) -> (usize, usize) {
-    let (ww, _wh) = app.window_size;
+    let (ww, wh) = app.window_size;
     let term_tabs = if app.term_tabs_vertical && !app.terminals.is_empty() {
         app.term_tab_width + 8.0
     } else {
         0.0
     };
-    let panel_w = (ww - 30.0 - term_tabs).max(80.0);
+    // island padding [8, 4] → 8px top+bottom, 4px left+right
+    // titlebar: 44px
+    // statusbar: 26px (when visible)
+    // island ring: 1px each side
+    let panel_w = (ww - 2.0 * 4.0 - 2.0 * 1.0 - term_tabs).max(80.0);
     let statusbar = if app.term_statusbar_visible { 26.0 } else { 0.0 };
-    let panel_h = (app.terminal_height - 2.0 - 38.0 - statusbar).max(40.0);
+    let panel_h = (wh - 2.0 * 8.0 - 2.0 * 1.0 - 44.0 - statusbar).max(40.0);
     terminal::widget::grid_size_for_pixels(panel_w, panel_h)
 }
 
@@ -3598,7 +3714,11 @@ fn search_bar(app: &TerminalPanel) -> iced::Element<'static, Message> {
 // Keyboard event handling (global, like original Kortina)
 // =============================================================================
 
-fn keyboard_event_to_message(k: &iced::keyboard::Event, status: iced::event::Status) -> Message {
+fn keyboard_event_to_message(
+    k: &iced::keyboard::Event,
+    status: iced::event::Status,
+    app_cursor_keys: bool,
+) -> Message {
     use iced::keyboard::{Event as KE, Key};
 
     let (keybinds, capture) = crate::keybinds::live();
@@ -3650,6 +3770,36 @@ fn keyboard_event_to_message(k: &iced::keyboard::Event, status: iced::event::Sta
                         crate::keybinds::Action::NextTab => Message::TermSelectNext,
                         crate::keybinds::Action::PrevTab => Message::TermSelectPrev,
                         crate::keybinds::Action::Settings => Message::SettingsOpen,
+                        crate::keybinds::Action::ScrollUp => Message::Event(iced::Event::Mouse(
+                            iced::mouse::Event::WheelScrolled {
+                                delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: 3.0 },
+                            },
+                        )),
+                        crate::keybinds::Action::ScrollDown => Message::Event(iced::Event::Mouse(
+                            iced::mouse::Event::WheelScrolled {
+                                delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: -3.0 },
+                            },
+                        )),
+                        crate::keybinds::Action::ScrollPageUp => Message::Event(iced::Event::Mouse(
+                            iced::mouse::Event::WheelScrolled {
+                                delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: 20.0 },
+                            },
+                        )),
+                        crate::keybinds::Action::ScrollPageDown => Message::Event(iced::Event::Mouse(
+                            iced::mouse::Event::WheelScrolled {
+                                delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: -20.0 },
+                            },
+                        )),
+                        crate::keybinds::Action::ScrollHome => Message::Event(iced::Event::Mouse(
+                            iced::mouse::Event::WheelScrolled {
+                                delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: 1000.0 },
+                            },
+                        )),
+                        crate::keybinds::Action::ScrollEnd => Message::Event(iced::Event::Mouse(
+                            iced::mouse::Event::WheelScrolled {
+                                delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: -1000.0 },
+                            },
+                        )),
                     };
                 }
             }
@@ -3673,7 +3823,7 @@ fn keyboard_event_to_message(k: &iced::keyboard::Event, status: iced::event::Sta
 
             // Special keys → escape sequences
             if let Key::Named(named) = key {
-                if let Some(seq) = named_key_to_seq(*named) {
+                if let Some(seq) = named_key_to_seq(*named, app_cursor_keys) {
                     return Message::TermWrite(seq.into_bytes());
                 }
             }
@@ -3691,8 +3841,27 @@ fn keyboard_event_to_message(k: &iced::keyboard::Event, status: iced::event::Sta
     }
 }
 
-fn named_key_to_seq(named: iced::keyboard::key::Named) -> Option<String> {
+fn named_key_to_seq(named: iced::keyboard::key::Named, app_cursor_keys: bool) -> Option<String> {
     use iced::keyboard::key::Named;
+
+    // DECCKM (?1): the cursor keys and Home/End switch to their SS3 form
+    // (`ESC O x`). Programs that enabled the mode — readline's `smkx`,
+    // vim's keypad mode, most TUIs — ignore the plain CSI form, so sending
+    // it is what makes Home/End look dead there.
+    if app_cursor_keys {
+        let ss3 = match named {
+            Named::ArrowUp => "A",
+            Named::ArrowDown => "B",
+            Named::ArrowRight => "C",
+            Named::ArrowLeft => "D",
+            Named::Home => "H",
+            Named::End => "F",
+            _ => "",
+        };
+        if !ss3.is_empty() {
+            return Some(format!("\x1bO{ss3}"));
+        }
+    }
 
     let seq = match named {
         Named::Enter => "\r".to_string(),
@@ -3734,6 +3903,49 @@ mod tests {
         assert_eq!(title_cell_width("ab"), 2);
         assert_eq!(title_cell_width("中文"), 4);
         assert_eq!(title_cell_width("中文ab"), 6);
+    }
+
+    #[test]
+    fn named_keys_use_csi_form_by_default() {
+        use iced::keyboard::key::Named as N;
+        for (key, seq) in [
+            (N::Home, "\x1b[H"),
+            (N::End, "\x1b[F"),
+            (N::ArrowUp, "\x1b[A"),
+            (N::ArrowLeft, "\x1b[D"),
+            (N::Delete, "\x1b[3~"),
+            (N::PageUp, "\x1b[5~"),
+        ] {
+            assert_eq!(named_key_to_seq(key, false).as_deref(), Some(seq), "{key:?}");
+        }
+        assert!(named_key_to_seq(N::F1, false).is_none());
+    }
+
+    #[test]
+    fn decckm_switches_cursor_keys_to_ss3() {
+        use iced::keyboard::key::Named as N;
+        // Cursor keys + Home/End switch to SS3 …
+        for (key, seq) in [
+            (N::Home, "\x1bOH"),
+            (N::End, "\x1bOF"),
+            (N::ArrowUp, "\x1bOA"),
+            (N::ArrowDown, "\x1bOB"),
+            (N::ArrowRight, "\x1bOC"),
+            (N::ArrowLeft, "\x1bOD"),
+        ] {
+            assert_eq!(named_key_to_seq(key, true).as_deref(), Some(seq), "{key:?}");
+        }
+        // … everything else keeps its CSI form, exactly like xterm.
+        for (key, seq) in [
+            (N::Delete, "\x1b[3~"),
+            (N::Insert, "\x1b[2~"),
+            (N::PageUp, "\x1b[5~"),
+            (N::PageDown, "\x1b[6~"),
+            (N::Enter, "\r"),
+            (N::Tab, "\t"),
+        ] {
+            assert_eq!(named_key_to_seq(key, true).as_deref(), Some(seq), "{key:?}");
+        }
     }
 
     #[test]

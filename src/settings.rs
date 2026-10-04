@@ -27,9 +27,9 @@ pub const GLOW_PRESETS: [u32; 8] = [
 pub enum Section {
     Appearance,
     Shell,
-    System,
     Glow,
     Keybinds,
+    System,
     About,
 }
 
@@ -38,9 +38,9 @@ impl Section {
         match self {
             Section::Appearance => "外观",
             Section::Shell => "Shell",
-            Section::System => "系统",
             Section::Glow => "光晕",
             Section::Keybinds => "快捷键",
+            Section::System => "系统",
             Section::About => "关于",
         }
     }
@@ -49,9 +49,9 @@ impl Section {
         match self {
             Section::Appearance => Icon::PanelRight,
             Section::Shell => Icon::Terminal,
-            Section::System => Icon::Settings,
             Section::Glow => Icon::LayoutGrid,
             Section::Keybinds => Icon::Square,
+            Section::System => Icon::Settings,
             Section::About => Icon::Info,
         }
     }
@@ -59,9 +59,9 @@ impl Section {
     pub const ALL: [Section; 6] = [
         Section::Appearance,
         Section::Shell,
-        Section::System,
         Section::Glow,
         Section::Keybinds,
+        Section::System,
         Section::About,
     ];
 }
@@ -126,35 +126,103 @@ pub fn settings_panel(app: &TerminalPanel) -> iced::Element<'static, Message> {
     .max_height(560.0)
     .center_x(Length::Fill);
 
-    // Color picker modal overlay (click outside to dismiss). The panel
-    // sits ABOVE the shield in a stack, so clicks inside it never reach
-    // the close handler.
-    if app.picker.is_some() {
-        let p = crate::animation::menu_ease(
-            (app.picker_anim_t / crate::animation::MENU_ANIM_MS).clamp(0.0, 1.0),
-        );
-        let panel = picker_overlay(app);
-        let panel = crate::animation::Shifted::new(
-            iced::Vector::new(0.0, (1.0 - p) * -10.0),
-            panel,
-        );
-        iced::widget::stack![
-            main,
-            mouse_area(
-                container(iced::widget::Space::new())
+    // Shell dropdown or color picker modal overlay (click outside to dismiss).
+    // The panel sits ABOVE the shield in a stack, so clicks inside it never
+    // reach the close handler.
+    let shell_dropdown_active = app.settings_shell_menu_open || app.shell_menu_closing;
+    if shell_dropdown_active || app.picker.is_some() {
+        // Build overlays inside a stack constrained to main's dimensions
+        // so positioning anchors are relative to the settings panel, not the window.
+        let mut inner_stack = iced::widget::stack![main];
+
+        // Full-screen closer shield — catches any click outside open menus.
+        // Only active while the menu is OPEN (not during close animation).
+        if app.settings_shell_menu_open {
+            inner_stack = inner_stack.push(
+                mouse_area(
+                    container(iced::widget::Space::new())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .on_press(Message::SettingsShellMenuClose),
+            );
+        }
+        if app.picker.is_some() {
+            inner_stack = inner_stack.push(
+                mouse_area(
+                    container(iced::widget::Space::new())
+                        .width(Length::Fill)
+                        .height(Length::Fill),
+                )
+                .on_press(Message::GlowPickerClose),
+            );
+        }
+
+        // Shell dropdown overlay (visible during both open and close anim)
+        if shell_dropdown_active {
+            let p = if app.settings_shell_menu_open {
+                crate::animation::menu_ease(
+                    (app.shell_menu_anim_t / crate::animation::MENU_ANIM_MS).clamp(0.0, 1.0),
+                )
+            } else {
+                1.0 - crate::animation::menu_close_ease(
+                    1.0 - (app.shell_menu_anim_t / crate::animation::MENU_ANIM_MS).clamp(0.0, 1.0),
+                )
+            };
+            // The animated panel is a fixed-size box that the menu is clipped
+            // into, so the box must be the menu's *natural* size — a taller
+            // one keeps painting an empty strip past the last option.
+            let e_w = (SHELL_MENU_W * p).max(1.0);
+            let e_h = (SHELL_MENU_H * p).max(1.0);
+            let menu_panel = container(shell_menu(app)).width(Pixels(SHELL_MENU_W));
+            let animated_menu = container(menu_panel)
+                .width(Pixels(e_w))
+                .height(Pixels(e_h))
+                .clip(true)
+                .style(|_t| iced::widget::container::Style {
+                    background: Some(iced::Background::Color(theme::BG_PRIMARY)),
+                    border: iced::Border {
+                        color: theme::BORDER,
+                        width: 1.0,
+                        radius: iced::border::Radius::from(8.0),
+                    },
+                    ..Default::default()
+                });
+            inner_stack = inner_stack.push(
+                container(animated_menu)
+                    .padding(crate::styles::pad4(88.0, 16.0, 0.0, 0.0))
                     .width(Length::Fill)
-                    .height(Length::Fill),
-            )
-            .on_press(Message::GlowPickerClose),
-            container(panel)
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .center_x(Length::Fill)
-                .center_y(Length::Fill),
-        ]
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+                    .height(Length::Fill)
+                    .align_x(alignment::Horizontal::Right)
+                    .align_y(alignment::Vertical::Top),
+            );
+        }
+
+        // Color picker overlay
+        if app.picker.is_some() {
+            let p = crate::animation::menu_ease(
+                (app.picker_anim_t / crate::animation::MENU_ANIM_MS).clamp(0.0, 1.0),
+            );
+            let panel = picker_overlay(app);
+            let panel = crate::animation::Shifted::new(
+                iced::Vector::new(0.0, (1.0 - p) * -10.0),
+                panel,
+            );
+            inner_stack = inner_stack.push(
+                container(panel)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            );
+        }
+
+        container(inner_stack)
+            .width(iced::Pixels(880.0))
+            .height(Length::Fill)
+            .max_height(560.0)
+            .center_x(Length::Fill)
+            .into()
     } else {
         main.into()
     }
@@ -237,63 +305,17 @@ fn appearance_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
         Message::TermToggleTabsVertical,
     );
 
-    // Default shell: k-select style dropdown trigger.
-    let cur_label = match app.term_default_shell.as_str() {
-        "" => "系统默认".to_string(),
-        v => v.to_string(),
-    };
-    let shell = button(
-        container(
-            iced::widget::row![
-                text(cur_label).size(12.0).color(theme::TEXT),
-                icon(Icon::ChevronDown, theme::DIM, 11.0, 2.0),
-            ]
-            .spacing(6.0),
-        )
-        .padding([4.0, 10.0]),
+    container(
+        iced::widget::column![
+            section_title("外观"),
+            setting_row("显示状态栏", statusbar),
+            setting_row("垂直标签页", vertical),
+        ]
+        .spacing(2.0)
+        .width(Length::Fill),
     )
-    .on_press(Message::ShellCycle)
-    .style(|_t, st| iced::widget::button::Style {
-        background: Some(iced::Background::Color(match st {
-            button::Status::Hovered | button::Status::Pressed => theme::BG_ELEVATED,
-            _ => theme::HOVER,
-        })),
-        border: iced::Border {
-            radius: iced::border::Radius::from(6.0),
-            ..Default::default()
-        },
-        ..iced::widget::button::Style::default()
-    });
-
-    let rows = iced::widget::column![
-        section_title("外观"),
-        setting_row("显示状态栏", statusbar),
-        setting_row("垂直标签页", vertical),
-        setting_row("新终端默认 Shell", shell.into()),
-    ]
-    .spacing(2.0)
-    .width(Length::Fill);
-
-    // Dropdown menu overlays the rows right under the shell trigger.
-    let body: iced::Element<'static, Message> = if app.shell_menu_open {
-        let p = crate::animation::menu_ease(
-            (app.shell_menu_anim_t / crate::animation::MENU_ANIM_MS).clamp(0.0, 1.0),
-        );
-        let menu = container(shell_menu(app))
-            .padding(crate::styles::pad4(128.0, 40.0, 0.0, 0.0))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(alignment::Horizontal::Right)
-            .align_y(alignment::Vertical::Top);
-        iced::Element::from(iced::widget::stack![
-            rows,
-            crate::animation::Shifted::new(iced::Vector::new(0.0, (1.0 - p) * -8.0), menu),
-        ])
-    } else {
-        rows.into()
-    };
-
-    container(body).padding(16.0).into()
+    .padding(16.0)
+    .into()
 }
 
 /// Shell dropdown trigger, shared by the Appearance and Shell sections.
@@ -327,9 +349,26 @@ pub fn shell_selector_trigger(app: &TerminalPanel, msg: Message) -> iced::Elemen
     .into()
 }
 
+/// Shell dropdown metrics — the animated panel is a fixed-size box that the
+/// menu is clipped into, so its size must match the menu's natural size,
+/// exactly like [`crate::terminal_panel`] does for its context menus.
+///
+/// iced lays text out at 1.3× the font size by default (`LineHeight`), so one
+/// option row is `12 * 1.3 + 7 * 2` px tall; the whole panel is the rows plus
+/// the list's padding. Deriving it here keeps the box in step with the items
+/// instead of being a hand-tuned magic number.
+const SHELL_MENU_W: f32 = 160.0;
+const SHELL_MENU_PAD: f32 = 4.0;
+const SHELL_ITEM_TEXT: f32 = 12.0;
+const SHELL_ITEM_PAD_Y: f32 = 7.0;
+const SHELL_ITEM_H: f32 = SHELL_ITEM_TEXT * 1.3 + SHELL_ITEM_PAD_Y * 2.0;
+const SHELL_MENU_H: f32 = SHELL_OPTIONS.len() as f32 * SHELL_ITEM_H + SHELL_MENU_PAD * 2.0;
+
 /// k-select style dropdown for the shell preference.
 fn shell_menu(app: &TerminalPanel) -> iced::Element<'static, Message> {
-    let mut items = iced::widget::column![].spacing(0.0).padding([4.0, 4.0]);
+    let mut items = iced::widget::column![]
+        .spacing(0.0)
+        .padding([SHELL_MENU_PAD, SHELL_MENU_PAD]);
     for opt in SHELL_OPTIONS {
         let selected = match app.term_default_shell.as_str() {
             "" => opt == "系统默认",
@@ -338,11 +377,11 @@ fn shell_menu(app: &TerminalPanel) -> iced::Element<'static, Message> {
         items = items.push(
             button(
                 text(opt)
-                    .size(12.0)
+                    .size(SHELL_ITEM_TEXT)
                     .color(theme::TEXT),
             )
             .width(Length::Fill)
-            .padding([7.0, 10.0])
+            .padding([SHELL_ITEM_PAD_Y, 10.0])
             .on_press(Message::ShellSelect(opt.to_string()))
             .style(move |_t, st| iced::widget::button::Style {
                 background: Some(iced::Background::Color(
@@ -364,16 +403,7 @@ fn shell_menu(app: &TerminalPanel) -> iced::Element<'static, Message> {
         );
     }
     container(items)
-        .width(Pixels(160.0))
-        .style(|_t| iced::widget::container::Style {
-            background: Some(iced::Background::Color(theme::BG_PRIMARY)),
-            border: iced::Border {
-                color: theme::BORDER,
-                width: 1.0,
-                radius: iced::border::Radius::from(8.0),
-            },
-            ..Default::default()
-        })
+        .width(Pixels(SHELL_MENU_W - SHELL_MENU_PAD * 2.0))
         .into()
 }
 
@@ -483,7 +513,7 @@ fn glow_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
         } else {
             container(
                 iced::widget::row![
-                    text("已单独设定 · 跟随光晕").size(11.0).color(theme::DIM),
+                    text("已单独设定 跟随光晕").size(11.0).color(theme::DIM),
                     button(text("跟随光晕").size(11.0).color(theme::TEXT))
                         .padding([4.0, 10.0])
                         .on_press(Message::AccentFollowGlow)
@@ -1113,22 +1143,7 @@ fn shell_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
         .width(Length::Fill),
     );
 
-    let body: iced::Element<'static, Message> = if app.settings_shell_menu_open {
-        // Overlay the list right below the trigger, same pattern as the
-        // Appearance section's dropdown.
-        let menu = container(shell_menu(app))
-            .padding(crate::styles::pad4(128.0, 40.0, 0.0, 0.0))
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .align_x(alignment::Horizontal::Right)
-            .align_y(alignment::Vertical::Top);
-        let base: iced::Element<'static, Message> =
-            container(rows).padding(16.0).into();
-        iced::Element::from(iced::widget::stack![base, menu])
-    } else {
-        container(rows).padding(16.0).into()
-    };
-    body
+    container(rows).padding(16.0).into()
 }
 
 fn system_section(app: &TerminalPanel) -> iced::Element<'static, Message> {

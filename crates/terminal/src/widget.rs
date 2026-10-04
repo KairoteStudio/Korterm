@@ -62,10 +62,10 @@ fn measure_char_width() -> f32 {
 }
 
 const PALETTE: [(u8, u8, u8); 16] = [
-    (0, 0, 0), (205, 0, 0), (0, 205, 0), (205, 205, 0),
-    (0, 0, 238), (205, 0, 205), (0, 205, 205), (229, 229, 229),
-    (127, 127, 127), (255, 0, 0), (0, 255, 0), (255, 255, 0),
-    (92, 92, 255), (255, 0, 255), (0, 255, 255), (255, 255, 255),
+    (0x1a, 0x1b, 0x26), (0xf7, 0x76, 0x8e), (0x9e, 0xce, 0x6a), (0xe0, 0xaf, 0x68),
+    (0x7a, 0xa2, 0xf7), (0xbb, 0x9a, 0xf7), (0x7d, 0xcf, 0xff), (0xc0, 0xca, 0xd5),
+    (0x41, 0x48, 0x68), (0xf7, 0x76, 0x8e), (0x9e, 0xce, 0x6a), (0xe0, 0xaf, 0x68),
+    (0x7a, 0xa2, 0xf7), (0xbb, 0x9a, 0xf7), (0x7d, 0xcf, 0xff), (0xac, 0xb0, 0xd0),
 ];
 
 fn palette256(idx: u8) -> (u8, u8, u8) {
@@ -117,10 +117,10 @@ const CELL_H: f32 = FONT_SIZE * 1.35;
 const CELL_W: f32 = FONT_SIZE * 0.62;
 pub const PAD_X: f32 = 6.0;
 pub const PAD_Y: f32 = 4.0;
-const BG: Color = Color::from_rgb8(0x12, 0x12, 0x12);
-const FG: Color = Color::from_rgb8(0xD4, 0xD4, 0xD4);
-const CURSOR: Color = Color::from_rgba8(0xD4, 0xD4, 0xD4, 0.55);
-const SELECTION: Color = Color::from_rgba8(0x6B, 0x9C, 0xFF, 0.30);
+const BG: Color = Color::from_rgb8(0x1a, 0x1b, 0x26);
+const FG: Color = Color::from_rgb8(0xc0, 0xca, 0xd5);
+const CURSOR: Color = Color::from_rgba8(0xc0, 0xca, 0xd5, 0.55);
+const SELECTION: Color = Color::from_rgba8(0x7a, 0xa2, 0xf7, 0.30);
 
 fn content_row_y(vy: f32) -> f32 {
     PAD_Y + vy * CELL_H

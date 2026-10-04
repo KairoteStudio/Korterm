@@ -819,6 +819,28 @@ mod tests {
     }
 
     #[test]
+    fn decckm_sequences_toggle_the_application_cursor_key_flag() {
+        let mut t = test_term();
+        assert!(!t.buf.application_cursor_keys, "normal mode by default");
+
+        // zsh's line editor sends this on every prompt.
+        t.feed_output(b"\x1b[?1h");
+        assert!(t.buf.application_cursor_keys);
+
+        // …and programs that restore defaults turn it back off.
+        t.feed_output(b"\x1b[?1l");
+        assert!(!t.buf.application_cursor_keys);
+
+        t.feed_output(b"\x1b[?1h\x1b=");
+        assert!(t.buf.application_cursor_keys);
+        t.feed_output(b"\x1b[?25l");
+        assert!(
+            t.buf.application_cursor_keys,
+            "DECTCEM must not disturb DECCKM"
+        );
+    }
+
+    #[test]
     fn search_survives_multibyte_prompt_chars() {
         let mut t = test_term();
         // A prompt line with powerline separators (3-byte U+E0B0).

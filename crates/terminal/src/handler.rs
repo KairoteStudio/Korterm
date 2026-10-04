@@ -176,7 +176,7 @@ impl InputHandler {
                 for &p in params {
                     match p {
                         25 => buf.cursor_visible = true,  // DECTCEM — text cursor enable
-                        1 => { /* DECCKM — application cursor keys; ignored */ }
+                        1 => buf.application_cursor_keys = true,  // DECCKM — SS3 cursor keys
                         2004 => { /* Bracketed paste mode; ignored */ }
                         1049 | 47 | 1047 => buf.alt_screen = true,
                         _ => {}
@@ -187,7 +187,7 @@ impl InputHandler {
                 for &p in params {
                     match p {
                         25 => buf.cursor_visible = false,
-                        1 => { /* DECCKM off */ }
+                        1 => buf.application_cursor_keys = false, // DECCKM off
                         2004 => { /* Bracketed paste off */ }
                         1049 | 47 | 1047 => buf.alt_screen = false,
                         _ => {}

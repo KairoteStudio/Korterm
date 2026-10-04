@@ -20,6 +20,12 @@ pub enum Action {
     NextTab,
     PrevTab,
     Settings,
+    ScrollUp,
+    ScrollDown,
+    ScrollPageUp,
+    ScrollPageDown,
+    ScrollHome,
+    ScrollEnd,
 }
 
 impl Action {
@@ -36,6 +42,12 @@ impl Action {
             Action::NextTab => "next_tab",
             Action::PrevTab => "prev_tab",
             Action::Settings => "settings",
+            Action::ScrollUp => "scroll_up",
+            Action::ScrollDown => "scroll_down",
+            Action::ScrollPageUp => "scroll_page_up",
+            Action::ScrollPageDown => "scroll_page_down",
+            Action::ScrollHome => "scroll_home",
+            Action::ScrollEnd => "scroll_end",
         }
     }
 
@@ -52,10 +64,16 @@ impl Action {
             Action::NextTab => "下一个标签",
             Action::PrevTab => "上一个标签",
             Action::Settings => "设置",
+            Action::ScrollUp => "向上滚动",
+            Action::ScrollDown => "向下滚动",
+            Action::ScrollPageUp => "向上翻页",
+            Action::ScrollPageDown => "向下翻页",
+            Action::ScrollHome => "滚动到顶部",
+            Action::ScrollEnd => "滚动到底部",
         }
     }
 
-    pub const ALL: [Action; 10] = [
+    pub const ALL: [Action; 16] = [
         Action::Copy,
         Action::Paste,
         Action::Search,
@@ -66,6 +84,12 @@ impl Action {
         Action::NextTab,
         Action::PrevTab,
         Action::Settings,
+        Action::ScrollUp,
+        Action::ScrollDown,
+        Action::ScrollPageUp,
+        Action::ScrollPageDown,
+        Action::ScrollHome,
+        Action::ScrollEnd,
     ];
 }
 
@@ -115,6 +139,12 @@ pub fn default_of(a: Action) -> &'static str {
         Action::NextTab => "ctrl+shift+right",
         Action::PrevTab => "ctrl+shift+left",
         Action::Settings => "ctrl+shift+s",
+        Action::ScrollUp => "shift+up",
+        Action::ScrollDown => "shift+down",
+        Action::ScrollPageUp => "shift+pageup",
+        Action::ScrollPageDown => "shift+pagedown",
+        Action::ScrollHome => "shift+home",
+        Action::ScrollEnd => "shift+end",
     }
 }
 

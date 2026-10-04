@@ -125,6 +125,10 @@ pub struct QuickState {
 }
 
 pub enum Message {
+    /// A raw key press plus whether a widget had already consumed it.
+    /// Resolved in `update()` because the escape sequence depends on the
+    /// terminal's DECCKM mode, which the event listener cannot see.
+    KeyPress(iced::keyboard::Event, iced::event::Status),
     Ready(window::Id),
     Monitor(Option<Size>),
     Scale(f32),
@@ -155,6 +159,7 @@ pub enum Message {
 impl Clone for Message {
     fn clone(&self) -> Self {
         match self {
+            Message::KeyPress(k, st) => Message::KeyPress(k.clone(), *st),
             Message::Ready(id) => Message::Ready(*id),
             Message::Monitor(s) => Message::Monitor(*s),
             Message::Scale(s) => Message::Scale(*s),
@@ -261,6 +266,17 @@ impl iced::Program for QuickProgram {
         message: Self::Message,
     ) -> iced::Task<Self::Message> {
         match message {
+            // The quick terminal ignores capture status on purpose: it has
+            // no focusable widgets that would legitimately eat a key.
+            Message::KeyPress(k, _status) => {
+                let app_cursor_keys = state
+                    .term
+                    .as_ref()
+                    .is_some_and(|t| t.buf.application_cursor_keys);
+                if let Some(msg) = key_to_message(&k, app_cursor_keys) {
+                    return self.update(state, msg);
+                }
+            }
             Message::Ready(id) => {
                 state.window = Some(id);
                 // Locate our X11 window once; then open with a fade-in
@@ -542,8 +558,10 @@ impl iced::Program for QuickProgram {
         // animated (grows from the anchor, shrinks on close).
         let body: Element<'_, Message> = if state.menu_t > 0.02 {
             let e = crate::animation::ease_out_cubic(state.menu_t);
-            let menu_w = 140.0 * e;
-            let menu_h = 100.0 * e;
+            // Natural size of the panel (3 rows + gaps + padding): the box
+            // below is sized from it so the card never paints an empty strip.
+            let menu_w = QUICK_MENU_W * e;
+            let menu_h = QUICK_MENU_H * e;
             let (mx, my) = state.menu_pos;
             let menu = container(
                 iced::widget::column![
@@ -551,11 +569,11 @@ impl iced::Program for QuickProgram {
                     menu_entry("粘贴", Message::Paste),
                     menu_entry("全选", Message::SelectAll),
                 ]
-                .spacing(2.0)
-                .padding([6.0, 4.0]),
+                .spacing(MENU_SPACING)
+                .padding([MENU_PAD_Y, 4.0]),
             )
-            .width(Length::Fixed(140.0))
-            .height(Length::Fixed(100.0))
+            .width(Length::Fixed(QUICK_MENU_W))
+            .height(Length::Fixed(QUICK_MENU_H))
             .style(|_t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(theme::BG_PRIMARY)),
                 border: iced::Border {
@@ -635,8 +653,8 @@ impl iced::Program for QuickProgram {
         iced::Subscription::batch([
             // Keyboard regardless of capture status + focus tracking
             // (focus lost → the overlay retracts).
-            iced::event::listen_with(|event, _status, _id| match &event {
-                iced::Event::Keyboard(k) => key_to_message(k),
+            iced::event::listen_with(|event, status, _id| match &event {
+                iced::Event::Keyboard(k) => Some(Message::KeyPress(k.clone(), status)),
                 iced::Event::InputMethod(iced::advanced::input_method::Event::Commit(content)) => {
                     Some(Message::Write(content.clone().into_bytes()))
                 }
@@ -757,6 +775,17 @@ async fn ipc_task(mut out: iced::futures::channel::mpsc::Sender<Message>) {
     }
 }
 
+/// Context menu metrics — the animated box clips the panel, so it must match
+/// the panel's natural size. iced lays text out at 1.3× the font size by
+/// default (`LineHeight`); a row is its 12px label plus `[6, 10]` padding.
+const QUICK_MENU_ROWS: usize = 3;
+const QUICK_MENU_W: f32 = 140.0;
+const MENU_SPACING: f32 = 2.0;
+const MENU_PAD_Y: f32 = 6.0;
+const QUICK_MENU_H: f32 = QUICK_MENU_ROWS as f32 * (12.0 * 1.3 + 6.0 * 2.0)
+    + MENU_SPACING * (QUICK_MENU_ROWS - 1) as f32
+    + MENU_PAD_Y * 2.0;
+
 fn menu_entry(label: &str, msg: Message) -> iced::Element<'static, Message> {
     let label = label.to_string();
     iced::widget::button(text(label).size(12.0).color(theme::TEXT))
@@ -776,7 +805,7 @@ fn menu_entry(label: &str, msg: Message) -> iced::Element<'static, Message> {
 
 /// Map a keyboard event to a quick-terminal message. Ctrl+` closes the
 /// window (matches the system shortcut used to open it).
-fn key_to_message(k: &iced::keyboard::Event) -> Option<Message> {
+fn key_to_message(k: &iced::keyboard::Event, app_cursor_keys: bool) -> Option<Message> {
     use iced::keyboard::{Event as KE, Key};
 
     match k {
@@ -805,7 +834,7 @@ fn key_to_message(k: &iced::keyboard::Event) -> Option<Message> {
                 }
             }
             if let Key::Named(named) = key {
-                if let Some(seq) = named_seq(*named) {
+                if let Some(seq) = named_seq(*named, app_cursor_keys) {
                     return Some(Message::Write(seq.into_bytes()));
                 }
             }
@@ -820,8 +849,27 @@ fn key_to_message(k: &iced::keyboard::Event) -> Option<Message> {
     }
 }
 
-fn named_seq(named: iced::keyboard::key::Named) -> Option<String> {
+fn named_seq(named: iced::keyboard::key::Named, app_cursor_keys: bool) -> Option<String> {
     use iced::keyboard::key::Named;
+
+    // DECCKM (?1): cursor keys and Home/End switch to their SS3 form
+    // (`ESC O x`). Programs that enabled it ignore the plain CSI form,
+    // which is what makes Home/End look dead in full-screen programs.
+    if app_cursor_keys {
+        let ss3 = match named {
+            Named::ArrowUp => "A",
+            Named::ArrowDown => "B",
+            Named::ArrowRight => "C",
+            Named::ArrowLeft => "D",
+            Named::Home => "H",
+            Named::End => "F",
+            _ => "",
+        };
+        if !ss3.is_empty() {
+            return Some(format!("\x1bO{ss3}"));
+        }
+    }
+
     let seq = match named {
         Named::Enter => "\r",
         Named::Backspace => "\x7f",

@@ -44,7 +44,7 @@ cd Korterm
 
 ```bash
 cargo install cargo-deb
-cargo deb                 # 生成 target/debian/korterm_1.0.0-1_amd64.deb
+cargo deb                 # 生成 target/debian/korterm_1.0.9-1_amd64.deb
 ```
 
 ### 手动构建

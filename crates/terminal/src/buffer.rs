@@ -126,6 +126,13 @@ pub struct Buffer {
     /// was drawn, `false` from the moment a command starts until the
     /// next prompt. `starts_prompted` is the initial value.
     pub at_prompt: bool,
+
+    /// DECCKM — application cursor keys (`ESC[?1h`). While set, the cursor
+    /// and Home/End keys must be sent in their SS3 form (`ESC O A`…`ESC O F`)
+    /// instead of the normal CSI form (`ESC [ A`…`ESC [ F`). Programs that
+    /// turn it on — readline's `smkx`, vim's keypad mode, many TUIs — ignore
+    /// the CSI form outright, so Home/End/arrows silently stop working.
+    pub application_cursor_keys: bool,
 }
 
 impl Buffer {
@@ -145,6 +152,7 @@ impl Buffer {
             dropped: 0,
             alt_screen: false,
             at_prompt: true,
+            application_cursor_keys: false,
         };
         for _ in 0..rows {
             buf.lines.push(BufferLine::new(cols));

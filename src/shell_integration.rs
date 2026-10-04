@@ -294,7 +294,7 @@ pub fn status_in(shell: &str, home: &Path) -> Status {
 pub fn rc_block(family: Family, home: &Path) -> String {
     let script = family.script_path(home);
     format!(
-        "{MARKER_BEGIN}\n# 由 Korterm 设置 → Shell 生成；删除本段即可还原。\n\
+        "{MARKER_BEGIN}\n# 由 Korterm 设置 → Shell 生成,删除本段即可还原。\n\
          [ -r \"{script}\" ] && . \"{script}\"\n{MARKER_END}\n",
         script = script.display()
     )

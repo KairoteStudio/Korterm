@@ -51,7 +51,16 @@ pub const LIGHT_MIN: Color = rgb(0xfe, 0xbc, 0x2e);
 pub const LIGHT_MAX: Color = rgb(0x28, 0xc8, 0x40);
 pub const LIGHT_BORDER: Color = rgba(0x00, 0x00, 0x00, 0.12);
 
-const SANS_FAMILY: &str = "Noto Sans CJK SC";
+/// Font family for every Chinese label in the UI.
+///
+/// Deliberately a single-face `.ttf`, not the usual "Noto Sans CJK SC":
+/// that family lives in a `.ttc` collection, and with it cosmic-text 0.15
+/// (through iced 0.14) hands back a **zero advance** for some CJK glyphs —
+/// "背景" laid out 13px wide, one character wide, so both glyphs printed
+/// on top of each other inside a one-character box. Same code, same font
+/// size, but five CJK characters in a row came out fine, which is why it
+/// read as a rendering fluke rather than a layout bug.
+const SANS_FAMILY: &str = "WenQuanYi Micro Hei";
 
 pub fn sans() -> Font {
     Font {

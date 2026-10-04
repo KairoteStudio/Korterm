@@ -305,7 +305,15 @@ impl iced::Program for QuickProgram {
                     .unwrap_or_else(|e| e.into_inner())
                     .take()
                 {
-                    state.term = Some(*term);
+                    let mut term = *term;
+                    // Same scheme as the main window (Settings → 外观);
+                    // the overlay must not look like a different app.
+                    term.theme = if crate::config::load().tokyo_night_bg {
+                        terminal::TermTheme::TokyoNight
+                    } else {
+                        terminal::TermTheme::PlainBackground
+                    };
+                    state.term = Some(term);
                 }
             }
             Message::Resize(cols, rows, w, h) => {

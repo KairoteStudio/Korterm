@@ -18,6 +18,8 @@ pub mod parser;
 pub mod pty;
 pub mod widget;
 
+pub use widget::TermTheme;
+
 use buffer::Buffer;
 use parser::Parser;
 use pty::PtySession;
@@ -27,6 +29,8 @@ pub struct Terminal {
     pub buf: Buffer,
     parser: Parser,
     pub pty: Option<PtySession>,
+    /// Color scheme used when drawing (Settings → 外观).
+    pub theme: TermTheme,
     /// Window title set via OSC 0 / 2.
     pub title: String,
     /// Previous cursor position (x, y) — the "from" point for the
@@ -90,6 +94,7 @@ impl Clone for Terminal {
             buf: self.buf.clone(),
             parser: self.parser.clone(),
             pty: None, // Skip PTY — it can't be cloned
+            theme: self.theme,
             title: self.title.clone(),
             prev_cursor: self.prev_cursor,
             cursor_anim_t: self.cursor_anim_t,
@@ -150,6 +155,7 @@ impl Terminal {
             view_offset: 0,
             search: None,
             shell_marks: false,
+            theme: TermTheme::default(),
         }
     }
 
@@ -177,6 +183,7 @@ impl Terminal {
             view_offset: 0,
             search: None,
             shell_marks: false,
+            theme: TermTheme::default(),
         };
         match PtySession::spawn_with(cols as u16, rows as u16, program, cwd) {
             Ok(session) => term.pty = Some(session),
@@ -222,6 +229,7 @@ impl Terminal {
                 view_offset: 0,
                 search: None,
                 shell_marks: false,
+                theme: TermTheme::default(),
             };
             match PtySession::spawn_with_async(
                 cols as u16,
@@ -815,6 +823,7 @@ mod tests {
             view_offset: 0,
             search: None,
             shell_marks: false,
+            theme: TermTheme::default(),
         }
     }
 
@@ -1041,6 +1050,7 @@ mod busy_tests {
             view_offset: 0,
             search: None,
             shell_marks: false,
+            theme: TermTheme::default(),
         }
     }
 

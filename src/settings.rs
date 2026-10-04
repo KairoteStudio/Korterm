@@ -269,7 +269,10 @@ fn setting_row(
 ) -> iced::Element<'static, Message> {
     container(
         iced::widget::row![
-            text(label.to_string()).size(13.0).color(theme::TEXT),
+            text(label.to_string())
+                .size(13.0)
+                .font(theme::sans())
+                .color(theme::TEXT),
             iced::widget::Space::new().width(Length::Fill),
             control,
         ]
@@ -283,7 +286,12 @@ fn setting_row(
 }
 
 fn section_title(t: &str) -> iced::Element<'static, Message> {
-    container(text(t.to_string()).size(14.0).color(theme::TEXT))
+    container(
+        text(t.to_string())
+            .size(14.0)
+            .font(theme::sans())
+            .color(theme::TEXT),
+    )
         .width(Length::Fill)
         .padding(crate::styles::pad4(4.0, 0.0, 10.0, 0.0))
         .into()
@@ -304,12 +312,31 @@ fn appearance_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
         app.toggle_progress[1],
         Message::TermToggleTabsVertical,
     );
+    let tokyo = toggle_switch(
+        app.toggle_progress[2],
+        Message::TermToggleTokyoNight,
+    );
 
     container(
         iced::widget::column![
             section_title("外观"),
             setting_row("显示状态栏", statusbar),
             setting_row("垂直标签页", vertical),
+            // Chinese first, Latin last, so the label reads like its
+            // neighbours. (The glyphs themselves used to collide — see
+            // SANS_FAMILY in theme.rs.)
+            setting_row("背景 Tokyo Night", tokyo),
+            // The switch above only moves the surface behind the glyphs;
+            // this line says so, because a label like "配色" alone reads
+            // like it would restyle the program's own colors too.
+            container(
+                text("关闭后仅把背景换成纯黑；文字与 16 色始终是 Tokyo Night，程序输出不变。")
+                    .size(11.0)
+                    .font(theme::sans())
+                    .color(theme::DIM),
+            )
+            .padding(crate::styles::pad4(10.0, 2.0, 4.0, 0.0))
+            .width(Length::Fill),
         ]
         .spacing(2.0)
         .width(Length::Fill),

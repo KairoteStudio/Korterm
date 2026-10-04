@@ -236,6 +236,9 @@ pub struct TerminalPanel {
     /// Current IME composition (preedit) shown over-the-spot.
     pub ime_preedit: String,
     pub term_statusbar_visible: bool,
+    /// Whether terminals paint the tinted Tokyo Night background
+    /// (Settings → 外观). Mirrored onto every live terminal when it flips.
+    pub term_tokyo_night_bg: bool,
     pub term_tabs_vertical: bool,
     pub term_tab_width: f32,
     pub terminal_seq: usize,
@@ -299,10 +302,11 @@ pub struct TerminalPanel {
     pub shell_menu_closing: bool,
     /// Color picker popover entrance animation progress.
     pub picker_anim_t: f32,
-    /// iOS-toggle animation progress per switch ([statusbar, vertical]).
-    pub toggle_progress: [f32; 2],
+    /// iOS-toggle animation progress per switch
+    /// ([statusbar, vertical tabs, tokyo night]).
+    pub toggle_progress: [f32; TOGGLE_COUNT],
     /// Toggle switch animation targets (0 = off, 1 = on).
-    pub toggle_anim_target: [usize; 2],
+    pub toggle_anim_target: [usize; TOGGLE_COUNT],
     /// Search bar state (open = visible, closing = play collapse anim).
     pub search_open: bool,
     pub search_closing: bool,
@@ -316,6 +320,23 @@ pub struct TerminalPanel {
     /// Hex color text drafts for the two glow cards.
     pub glow_hex_top: String,
     pub glow_hex_bottom: String,
+}
+
+/// Number of iOS-style switches in Settings → 外观. Animation and the
+/// frame-scheduling check both derive from it, so a new switch animates
+/// without having to be remembered in three places.
+pub const TOGGLE_COUNT: usize = 3;
+
+/// Whether any settings switch is still gliding toward its target.
+///
+/// The frame scheduler keys off this. It used to be an inline check over
+/// the first two switches only, so a later switch flipped its setting
+/// while its knob stayed frozen until the app restarted.
+pub fn switches_animating(
+    progress: &[f32; TOGGLE_COUNT],
+    target: &[usize; TOGGLE_COUNT],
+) -> bool {
+    (0..TOGGLE_COUNT).any(|i| progress[i] != target[i] as f32)
 }
 
 pub enum Message {
@@ -413,6 +434,7 @@ pub enum Message {
     TermClear,
     TermToggleStatusbar,
     TermToggleTabsVertical,
+    TermToggleTokyoNight,
     TermShowShellSelector,
     TermShowActionsMenu,
     TermCloseMenus,
@@ -540,6 +562,7 @@ impl Clone for Message {
             Message::TermClear => Message::TermClear,
             Message::TermToggleStatusbar => Message::TermToggleStatusbar,
             Message::TermToggleTabsVertical => Message::TermToggleTabsVertical,
+            Message::TermToggleTokyoNight => Message::TermToggleTokyoNight,
             Message::TermShowShellSelector => Message::TermShowShellSelector,
             Message::TermShowActionsMenu => Message::TermShowActionsMenu,
             Message::TermCloseMenus => Message::TermCloseMenus,
@@ -647,6 +670,7 @@ impl std::fmt::Debug for Message {
             Message::TermClear => write!(f, "TermClear"),
             Message::TermToggleStatusbar => write!(f, "TermToggleStatusbar"),
             Message::TermToggleTabsVertical => write!(f, "TermToggleTabsVertical"),
+            Message::TermToggleTokyoNight => write!(f, "TermToggleTokyoNight"),
             Message::TermShowShellSelector => write!(f, "TermShowShellSelector"),
             Message::TermShowActionsMenu => write!(f, "TermShowActionsMenu"),
             Message::TermCloseMenus => write!(f, "TermCloseMenus"),
@@ -767,6 +791,7 @@ impl TerminalPanel {
             picker_backup: None,
             picker_drag: 0,
             settings_anim_t: 0.0,
+            term_tokyo_night_bg: cfg.tokyo_night_bg,
             shell_menu_open: false,
             shell_menu_anim_t: 0.0,
             shell_menu_closing: false,
@@ -777,10 +802,12 @@ impl TerminalPanel {
             toggle_progress: [
                 cfg.statusbar_visible as u8 as f32,
                 cfg.tabs_vertical as u8 as f32,
+                cfg.tokyo_night_bg as u8 as f32,
             ],
             toggle_anim_target: [
                 cfg.statusbar_visible as usize,
                 cfg.tabs_vertical as usize,
+                cfg.tokyo_night_bg as usize,
             ],
             search_open: false,
             search_closing: false,
@@ -1088,13 +1115,16 @@ impl TerminalPanel {
                 let Some(term) = take_pending_term(seq) else {
                     return Task::none();
                 };
+                let theme = self.terminal_theme();
+                let mut term = *term;
+                term.theme = theme;
                 self.terminals.push(TerminalSession {
                     id: seq,
                     kind: SessionKind::Terminal,
                     title,
                     title_base: base,
                     renamed: false,
-                    term: *term,
+                    term,
                 });
                 // Seed the FLIP tracker so the new tab slides in from under
                 // the "+" button (first button of the right-side group,
@@ -1243,6 +1273,10 @@ impl TerminalPanel {
                         renamed: true,
                         term: terminal::Terminal::headless(80, 24),
                     });
+                    let theme = self.terminal_theme();
+                    if let Some(last) = self.terminals.last_mut() {
+                        last.term.theme = theme;
+                    }
                     self.settings_anim_t = 0.0;
                     self.select_terminal(self.terminals.len() - 1);
                 }
@@ -1656,6 +1690,19 @@ impl TerminalPanel {
                     Message::RestoreTabsScroll
                 });
             }
+            Message::TermToggleTokyoNight => {
+                self.term_tokyo_night_bg = !self.term_tokyo_night_bg;
+                self.toggle_anim_target[2] = self.term_tokyo_night_bg as usize;
+                // Existing terminals keep their own field, so repaint them
+                // all — otherwise the switch would only affect new tabs.
+                let theme = self.terminal_theme();
+                for t in &mut self.terminals {
+                    t.term.theme = theme;
+                }
+                self.close_actions_menu();
+                self.close_context_menu();
+                self.save_config();
+            }
             Message::RestoreTabsScroll => {
                 use iced::widget::scrollable::AbsoluteOffset;
                 if self.term_tabs_vertical {
@@ -2058,7 +2105,7 @@ impl TerminalPanel {
                         self.picker_anim_t = (self.picker_anim_t + dt_ms)
                             .min(crate::animation::MENU_ANIM_MS);
                     }
-                    for i in 0..2 {
+                    for i in 0..TOGGLE_COUNT {
                         let t = &mut self.toggle_progress[i];
                         let target = self.toggle_anim_target[i] as f32;
                         *t += (target - *t) * 0.25;
@@ -2213,6 +2260,22 @@ impl TerminalPanel {
         self.terminals.get_mut(idx)
     }
 
+    /// Whether any settings switch is still gliding toward its target.
+    /// The frame scheduler keys off this, so a switch this forgets stays
+    /// visually frozen at its old position until the app restarts.
+    pub fn toggle_animating(&self) -> bool {
+        switches_animating(&self.toggle_progress, &self.toggle_anim_target)
+    }
+
+    /// The terminal color scheme implied by the current preference.
+    fn terminal_theme(&self) -> terminal::TermTheme {
+        if self.term_tokyo_night_bg {
+            terminal::TermTheme::TokyoNight
+        } else {
+            terminal::TermTheme::PlainBackground
+        }
+    }
+
     /// Persist the current user preferences to disk.
     fn save_config(&self) {
         crate::config::save(&crate::config::Config {
@@ -2229,6 +2292,7 @@ impl TerminalPanel {
                 .iter()
                 .map(|(a, c)| (a.id().to_string(), c.clone()))
                 .collect(),
+            tokyo_night_bg: self.term_tokyo_night_bg,
             x11_backend: self.x11_backend,
             accent: self.accent_override,
             first_run_done: self.first_run_done,
@@ -2870,8 +2934,7 @@ impl TerminalPanel {
             || (self.search_open && self.search_anim_t < crate::animation::MENU_ANIM_MS)
             || (self.settings_front_anim()
                 && (self.settings_anim_t < crate::animation::MENU_ANIM_MS
-                    || self.toggle_progress[0] != self.toggle_anim_target[0] as f32
-                    || self.toggle_progress[1] != self.toggle_anim_target[1] as f32
+                    || self.toggle_animating()
                     || (self.picker.is_some()
                         && self.picker_anim_t < crate::animation::MENU_ANIM_MS)
                     || (self.settings_shell_menu_open
@@ -3919,6 +3982,31 @@ mod tests {
             assert_eq!(named_key_to_seq(key, false).as_deref(), Some(seq), "{key:?}");
         }
         assert!(named_key_to_seq(N::F1, false).is_none());
+    }
+
+    #[test]
+    fn every_switch_counts_as_animating() {
+        let mut progress = [0.0; TOGGLE_COUNT];
+        let target = [0; TOGGLE_COUNT];
+        assert!(
+            !switches_animating(&progress, &target),
+            "settled switches need no frames"
+        );
+
+        for i in 0..TOGGLE_COUNT {
+            progress[i] = 0.5;
+            assert!(
+                switches_animating(&progress, &target),
+                "switch {i} mid-glide must keep the animation ticking"
+            );
+            progress[i] = 0.0;
+        }
+
+        // And a flipped target with a settled knob still asks for frames,
+        // which is exactly the "knob frozen until restart" case.
+        let mut target = [0; TOGGLE_COUNT];
+        target[TOGGLE_COUNT - 1] = 1;
+        assert!(switches_animating(&progress, &target));
     }
 
     #[test]

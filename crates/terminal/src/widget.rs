@@ -68,9 +68,49 @@ const PALETTE: [(u8, u8, u8); 16] = [
     (0x7a, 0xa2, 0xf7), (0xbb, 0x9a, 0xf7), (0x7d, 0xcf, 0xff), (0xac, 0xb0, 0xd0),
 ];
 
-fn palette256(idx: u8) -> (u8, u8, u8) {
+
+/// Terminal color scheme. Switchable in Settings → 外观.
+///
+/// Only the background differs between the two: the text colors and the
+/// 16-color palette are Tokyo Night either way, so switching never
+/// changes how a program's own output reads. A tinted surface is a
+/// matter of taste (and some screenshots/pipelines assume near-black
+/// behind the glyphs), a palette is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TermTheme {
+    #[default]
+    TokyoNight,
+    /// The same Tokyo Night text on a plain near-black surface.
+    PlainBackground,
+}
+
+/// Colors of one [`TermTheme`], resolved once per frame.
+pub struct ThemeColors {
+    pub bg: Color,
+    pub fg: Color,
+    pub cursor: Color,
+    pub selection: Color,
+    pub palette: &'static [(u8, u8, u8); 16],
+}
+
+impl TermTheme {
+    pub const fn colors(self) -> ThemeColors {
+        ThemeColors {
+            bg: match self {
+                TermTheme::TokyoNight => Color::from_rgb8(0x1a, 0x1b, 0x26),
+                TermTheme::PlainBackground => Color::from_rgb8(0x12, 0x12, 0x12),
+            },
+            fg: Color::from_rgb8(0xc0, 0xca, 0xd5),
+            cursor: Color::from_rgba8(0xc0, 0xca, 0xd5, 0.55),
+            selection: Color::from_rgba8(0x7a, 0xa2, 0xf7, 0.30),
+            palette: &PALETTE,
+        }
+    }
+}
+
+fn palette256(idx: u8, palette: &[(u8, u8, u8); 16]) -> (u8, u8, u8) {
     if (idx as usize) < 16 {
-        return PALETTE[idx as usize];
+        return palette[idx as usize];
     }
     if idx >= 232 {
         let v = 8 + (idx - 232) * 10;
@@ -86,14 +126,19 @@ fn palette256(idx: u8) -> (u8, u8, u8) {
     (component(r), component(g), component(b))
 }
 
-fn resolve_attr(attr: &Attr, default_fg: Color, default_bg: Color) -> (Color, Color) {
+fn resolve_attr(
+    attr: &Attr,
+    default_fg: Color,
+    default_bg: Color,
+    palette: &[(u8, u8, u8); 16],
+) -> (Color, Color) {
     let fg = match attr.fg_mode() {
         CM_RGB => {
             let [r, g, b] = attr.fg_rgb();
             Color::from_rgb8(r, g, b)
         }
         CM_P16 | CM_P256 => {
-            let (r, g, b) = palette256(attr.fg_palette() as u8);
+            let (r, g, b) = palette256(attr.fg_palette() as u8, palette);
             Color::from_rgb8(r, g, b)
         }
         _ => default_fg,
@@ -104,7 +149,7 @@ fn resolve_attr(attr: &Attr, default_fg: Color, default_bg: Color) -> (Color, Co
             Color::from_rgb8(r, g, b)
         }
         CM_P16 | CM_P256 => {
-            let (r, g, b) = palette256(attr.bg_palette() as u8);
+            let (r, g, b) = palette256(attr.bg_palette() as u8, palette);
             Color::from_rgb8(r, g, b)
         }
         _ => default_bg,
@@ -117,11 +162,6 @@ const CELL_H: f32 = FONT_SIZE * 1.35;
 const CELL_W: f32 = FONT_SIZE * 0.62;
 pub const PAD_X: f32 = 6.0;
 pub const PAD_Y: f32 = 4.0;
-const BG: Color = Color::from_rgb8(0x1a, 0x1b, 0x26);
-const FG: Color = Color::from_rgb8(0xc0, 0xca, 0xd5);
-const CURSOR: Color = Color::from_rgba8(0xc0, 0xca, 0xd5, 0.55);
-const SELECTION: Color = Color::from_rgba8(0x7a, 0xa2, 0xf7, 0.30);
-
 fn content_row_y(vy: f32) -> f32 {
     PAD_Y + vy * CELL_H
 }
@@ -188,11 +228,15 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
         // render_start..total is longer than the viewport).
         let draw_rows = visible_rows.min(total_lines.saturating_sub(render_start));
 
+        // Resolve the scheme once per frame; every color below comes
+        // from it, so switching themes is a single field read.
+        let theme = self.term.theme.colors();
+
         // Draw background
         frame.fill_rectangle(
             Point::new(0.0, 0.0),
             bounds.size(),
-            BG,
+            theme.bg,
         );
 
         // Draw only visible rows at viewport-relative positions
@@ -202,7 +246,7 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
             let text_y = row_top + 2.0;
 
             let mut current_text = String::with_capacity(line.cells.len());
-            let mut current_fg = FG;
+            let mut current_fg = theme.fg;
             let mut current_bg = Color::TRANSPARENT;
             let mut text_x = PAD_X;
             let mut span_start_x = PAD_X;
@@ -211,11 +255,11 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
                 if cell.width == 0 {
                     continue;
                 }
-                let (fg, bg) = resolve_attr(&cell.attr, FG, BG);
+                let (fg, bg) = resolve_attr(&cell.attr, theme.fg, theme.bg, theme.palette);
                 let ch = if cell.codepoint == 0 { ' ' } else {
                     char::from_u32(cell.codepoint).unwrap_or(' ')
                 };
-                let span_bg = if bg == BG { Color::TRANSPARENT } else { bg };
+                let span_bg = if bg == theme.bg { Color::TRANSPARENT } else { bg };
 
                 // Flush if style changed
                 if !current_text.is_empty() && (fg != current_fg || span_bg != current_bg) {
@@ -318,7 +362,7 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
                 frame.fill_rectangle(
                     Point::new(from_x, y),
                     Size::new(width, CELL_H),
-                    SELECTION,
+                    theme.selection,
                 );
             }
         }
@@ -353,14 +397,14 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
 
                 match state {
                     CursorRenderState::Showing => {
-                        frame.fill_rectangle(Point::new(x, y), size, CURSOR);
+                        frame.fill_rectangle(Point::new(x, y), size, theme.cursor);
                     }
                     CursorRenderState::NoFocus => {
                         frame.stroke_rectangle(
                             Point::new(x, y),
                             size,
                             canvas::Stroke::default()
-                                .with_color(FG)
+                                .with_color(theme.fg)
                                 .with_width(1.5),
                         );
                     }
@@ -393,7 +437,7 @@ pub fn terminal_view<'a, M: 'static>(
         .width(Length::Fill)
         .height(Length::Fill)
         .style(|_t| container::Style {
-            background: Some(Background::Color(BG)),
+            background: Some(Background::Color(term.theme.colors().bg)),
             ..Default::default()
         });
 
@@ -435,7 +479,45 @@ mod tests {
             view_offset: 0,
             search: None,
             shell_marks: false,
+            theme: TermTheme::default(),
         }
+    }
+
+    #[test]
+    fn the_switch_changes_the_background_and_nothing_else() {
+        assert_eq!(TermTheme::default(), TermTheme::TokyoNight);
+
+        let tinted = TermTheme::TokyoNight.colors();
+        let plain = TermTheme::PlainBackground.colors();
+        // The switch is only worth having if the background really
+        // changes…
+        assert_ne!(tinted.bg, plain.bg);
+        // …and text colors must not follow, or "plain background" would
+        // silently restyle every program's output.
+        assert_eq!(tinted.fg, plain.fg);
+        assert_eq!(tinted.cursor, plain.cursor);
+        assert_eq!(tinted.selection, plain.selection);
+        assert_eq!(tinted.palette[0], plain.palette[0], "black");
+        assert_eq!(tinted.palette[1], plain.palette[1], "red");
+        assert_eq!(tinted.palette[7], plain.palette[7], "bright white");
+    }
+
+    #[test]
+    fn resolve_attr_follows_the_active_theme() {
+        let mut attr = Attr::DEFAULT;
+        attr.set_fg_palette(1); // palette red
+        let tn = TermTheme::TokyoNight.colors();
+        let plain = TermTheme::PlainBackground.colors();
+        let (fg_tn, bg_tn) = resolve_attr(&attr, tn.fg, tn.bg, tn.palette);
+        let (fg_pl, bg_pl) = resolve_attr(&attr, plain.fg, plain.bg, plain.palette);
+        let rgb = |c: (u8, u8, u8)| Color::from_rgb8(c.0, c.1, c.2);
+        assert_eq!(fg_tn, rgb(tn.palette[1]));
+        assert_eq!(fg_pl, rgb(plain.palette[1]));
+        // Palette-colored foregrounds agree across both, while the cell
+        // background falls back to whichever surface is active.
+        assert_eq!(fg_tn, fg_pl);
+        assert_eq!(bg_tn, tn.bg);
+        assert_eq!(bg_pl, plain.bg);
     }
 
     #[test]

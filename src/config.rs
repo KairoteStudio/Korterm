@@ -33,6 +33,10 @@ pub struct Config {
     /// Whether the first-run welcome window has been dealt with. Set on
     /// every exit path from it, so the guidance shows exactly once.
     pub first_run_done: bool,
+    /// Whether the terminal paints the tinted Tokyo Night background.
+    /// Off keeps the Tokyo Night text colors and the same 16-color
+    /// palette, and only swaps the surface for plain near-black.
+    pub tokyo_night_bg: bool,
     /// Run the window on XWayland instead of native Wayland.
     ///
     /// winit (the windowing layer under iced) implements file drag & drop
@@ -64,6 +68,7 @@ impl Default for Config {
             glow_intensity_top: 1.0,
             glow_intensity_bottom: 1.0,
             keybinds: Vec::new(),
+            tokyo_night_bg: true,
             x11_backend: false,
             accent: 0,
             first_run_done: false,
@@ -144,6 +149,7 @@ fn parse_line(cfg: &mut Config, line: &str) {
             }
             "shell" => cfg.shell = value.to_string(),
             "x11_backend" => cfg.x11_backend = value == "true",
+            "tokyo_night_bg" => cfg.tokyo_night_bg = value == "true",
             "accent" => {
                 if let Ok(v) = u32::from_str_radix(value.trim_start_matches("0x"), 16) {
                     cfg.accent = v;
@@ -198,7 +204,7 @@ pub fn save(cfg: &Config) {
 /// Render the config as `key = value` lines (the on-disk format).
 fn serialize(cfg: &Config) -> String {
     let mut text = format!(
-        "statusbar_visible = {}\ntabs_vertical = {}\nsidebar_width = {:.1}\nshell = {}\nglow_blue = {:#06x}\nglow_amber = {:#06x}\nglow_intensity_top = {:.2}\nglow_intensity_bottom = {:.2}\nx11_backend = {}\naccent = {:#06x}\nfirst_run_done = {}\n",
+        "statusbar_visible = {}\ntabs_vertical = {}\nsidebar_width = {:.1}\nshell = {}\nglow_blue = {:#06x}\nglow_amber = {:#06x}\nglow_intensity_top = {:.2}\nglow_intensity_bottom = {:.2}\ntokyo_night_bg = {}\nx11_backend = {}\naccent = {:#06x}\nfirst_run_done = {}\n",
         cfg.statusbar_visible,
         cfg.tabs_vertical,
         cfg.sidebar_width,
@@ -207,6 +213,7 @@ fn serialize(cfg: &Config) -> String {
         cfg.glow_amber,
         cfg.glow_intensity_top,
         cfg.glow_intensity_bottom,
+        cfg.tokyo_night_bg,
         cfg.x11_backend,
         cfg.accent,
         cfg.first_run_done
@@ -243,6 +250,31 @@ mod tests {
         let d = Config::default();
         assert_eq!(d.accent, 0, "0 means 'follow the top glow'");
         assert!(!d.first_run_done);
+    }
+
+    #[test]
+    fn tokyo_night_background_defaults_on_and_round_trips() {
+        // On by default: 1.0.9 shipped the tinted background, so existing
+        // installs must not silently revert to plain black.
+        assert!(Config::default().tokyo_night_bg);
+
+        let cfg = Config {
+            tokyo_night_bg: false,
+            ..Default::default()
+        };
+        let text = serialize(&cfg);
+        assert!(text.contains("tokyo_night_bg = false"));
+
+        let mut parsed = Config::default();
+        for line in text.lines() {
+            parse_line(&mut parsed, line);
+        }
+        assert!(!parsed.tokyo_night_bg);
+
+        // A config written before this key existed keeps the default.
+        let mut legacy = Config::default();
+        parse_line(&mut legacy, "shell = zsh");
+        assert!(legacy.tokyo_night_bg);
     }
 
     #[test]

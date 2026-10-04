@@ -137,10 +137,10 @@ pub const fn pad4(top: f32, right: f32, bottom: f32, left: f32) -> iced::Padding
 }
 /// Button style for confirmation dialogs: primary action is filled with
 /// the accent colour, secondary is a plain bordered surface.
-pub fn dialog_button(primary: bool) -> button::StyleFn<'static, iced::Theme> {
+pub fn dialog_button(primary: bool, accent: Color) -> button::StyleFn<'static, iced::Theme> {
     Box::new(move |_t, status| button::Style {
         background: Some(Background::Color(if primary {
-            crate::theme::BLUE
+            accent
         } else {
             match status {
                 button::Status::Hovered | button::Status::Pressed => {

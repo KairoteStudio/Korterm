@@ -69,8 +69,26 @@ impl iced::Program for Korterm {
     fn view<'a>(
         &self,
         state: &'a Self::State,
-        _window: window::Id,
+        id: window::Id,
     ) -> iced::Element<'a, Self::Message, Self::Theme, Self::Renderer> {
+        // Secondary windows (the close-confirmation dialog, the first-run
+        // welcome) share the island chrome but render their own content.
+        if let Some(content) = state.aux_window_view(id) {
+            return container(
+                container(content)
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|_t| styles::island())
+                    .clip(true),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(1.0)
+            .style(|_t| styles::island_ring())
+            .clip(true)
+            .into();
+        }
+
         let terminal_content = state.view();
 
         // Island shell: ring + island (matches Kortina exactly)

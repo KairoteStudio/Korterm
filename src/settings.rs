@@ -296,6 +296,37 @@ fn appearance_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
     container(body).padding(16.0).into()
 }
 
+/// Shell dropdown trigger, shared by the Appearance and Shell sections.
+pub fn shell_selector_trigger(app: &TerminalPanel, msg: Message) -> iced::Element<'static, Message> {
+    let cur_label: String = match app.term_default_shell.as_str() {
+        "" => "系统默认".to_string(),
+        v => v.to_string(),
+    };
+    button(
+        container(
+            iced::widget::row![
+                text(cur_label).size(12.0).color(theme::TEXT),
+                icon(Icon::ChevronDown, theme::DIM, 11.0, 2.0),
+            ]
+            .spacing(6.0),
+        )
+        .padding([4.0, 10.0]),
+    )
+    .on_press(msg)
+    .style(|_t, st| iced::widget::button::Style {
+        background: Some(iced::Background::Color(match st {
+            button::Status::Hovered | button::Status::Pressed => theme::BG_ELEVATED,
+            _ => theme::HOVER,
+        })),
+        border: iced::Border {
+            radius: iced::border::Radius::from(6.0),
+            ..Default::default()
+        },
+        ..iced::widget::button::Style::default()
+    })
+    .into()
+}
+
 /// k-select style dropdown for the shell preference.
 fn shell_menu(app: &TerminalPanel) -> iced::Element<'static, Message> {
     let mut items = iced::widget::column![].spacing(0.0).padding([4.0, 4.0]);
@@ -408,12 +439,14 @@ fn lerp_color(a: Color, b: Color, t: f32) -> Color {
 // =============================================================================
 
 fn glow_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
+    let accent = app.accent_color();
     let top = glow_rows(
         0,
         "上方光晕",
         app.glow.blue,
         app.glow.intensity_top,
         &app.glow_hex_top,
+        accent,
     );
     let bottom = glow_rows(
         1,
@@ -421,6 +454,7 @@ fn glow_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
         app.glow.amber,
         app.glow.intensity_bottom,
         &app.glow_hex_bottom,
+        accent,
     );
 
     let reset = button(text("恢复默认光晕").size(12.0).color(theme::TEXT))
@@ -438,12 +472,51 @@ fn glow_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
             ..iced::widget::button::Style::default()
         });
 
+    let accent_hex = crate::glow::rgb_of(accent);
+    let accent_trigger = color_trigger(accent, format!("#{accent_hex:06x}"), 2);
+    let accent_note: iced::Element<'static, Message> =
+        if app.accent_override == 0 {
+            container(text("默认跟随上方光晕的颜色；点色块可单独指定。").size(11.0).color(theme::DIM))
+                .padding(crate::styles::pad4(10.0, 2.0, 0.0, 0.0))
+                .width(Length::Fill)
+                .into()
+        } else {
+            container(
+                iced::widget::row![
+                    text("已单独设定 · 跟随光晕").size(11.0).color(theme::DIM),
+                    button(text("跟随光晕").size(11.0).color(theme::TEXT))
+                        .padding([4.0, 10.0])
+                        .on_press(Message::AccentFollowGlow)
+                        .style(|_t, st| iced::widget::button::Style {
+                            background: Some(iced::Background::Color(match st {
+                                button::Status::Hovered | button::Status::Pressed => {
+                                    theme::BG_ELEVATED
+                                }
+                                _ => theme::HOVER,
+                            })),
+                            border: iced::Border {
+                                radius: iced::border::Radius::from(6.0),
+                                ..Default::default()
+                            },
+                            ..iced::widget::button::Style::default()
+                        }),
+                ]
+                .spacing(8.0),
+            )
+            .padding(crate::styles::pad4(10.0, 2.0, 0.0, 0.0))
+            .width(Length::Fill)
+            .into()
+        };
+
     container(
         iced::widget::column![
             section_title("光晕"),
             top,
             bottom,
             container(reset).padding(crate::styles::pad4(10.0, 0.0, 0.0, 0.0)),
+            section_title("强调色"),
+            setting_row("按钮与高亮", accent_trigger),
+            container(accent_note).padding(crate::styles::pad4(10.0, 0.0, 0.0, 0.0)),
         ]
         .spacing(2.0)
         .width(Length::Fill),
@@ -452,17 +525,14 @@ fn glow_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
     .into()
 }
 
-/// Color trigger row + brightness row for one glow.
-fn glow_rows(
-    which: u8,
-    label: &str,
+/// Swatch + hex label button; opens the picker for `which` (0 = top glow,
+/// 1 = bottom glow, 2 = accent).
+fn color_trigger(
     color: iced::Color,
-    intensity: f32,
-    _hex_draft: &str,
+    hex: String,
+    which: u8,
 ) -> iced::Element<'static, Message> {
-    let hex = crate::glow::rgb_of(color);
-    // Color trigger: rounded swatch + hex text; click opens the popover.
-    let trigger = button(
+    button(
         container(
             iced::widget::row![
                 container(iced::widget::Space::new())
@@ -477,7 +547,7 @@ fn glow_rows(
                         },
                         ..Default::default()
                     }),
-                text(format!("#{hex:06x}")).size(12.0).color(theme::DIM),
+                text(hex).size(12.0).color(theme::DIM),
             ]
             .spacing(8.0)
             .align_y(alignment::Vertical::Center),
@@ -495,7 +565,21 @@ fn glow_rows(
             ..Default::default()
         },
         ..iced::widget::button::Style::default()
-    });
+    })
+    .into()
+}
+
+/// Color trigger row + brightness row for one glow.
+fn glow_rows(
+    which: u8,
+    label: &str,
+    color: iced::Color,
+    intensity: f32,
+    _hex_draft: &str,
+    accent: iced::Color,
+) -> iced::Element<'static, Message> {
+    let hex = crate::glow::rgb_of(color);
+    let trigger = color_trigger(color, format!("#{hex:06x}"), which);
 
     // Brightness: styled continuous slider + numeric input + wheel ±1.
     let pct = (intensity * 100.0).round();
@@ -508,7 +592,7 @@ fn glow_rows(
         .style(move |_t, _status| iced::widget::slider::Style {
             rail: iced::widget::slider::Rail {
                 backgrounds: (
-                    iced::Background::Color(theme::BLUE),
+                    iced::Background::Color(accent),
                     iced::Background::Color(theme::BG_ELEVATED),
                 ),
                 width: 6.0,
@@ -541,7 +625,7 @@ fn glow_rows(
     iced::widget::column![
         setting_row(
             label,
-            trigger.into(),
+            trigger,
         ),
         setting_row("亮度", iced::widget::row![slider, num].spacing(10.0).align_y(alignment::Vertical::Center).into()),
     ]
@@ -554,6 +638,7 @@ fn glow_rows(
 // =============================================================================
 
 fn picker_overlay(app: &TerminalPanel) -> iced::Element<'static, Message> {
+    let accent = app.accent_color();
     let which = app.picker.unwrap_or(0);
     let (h, s, v) = app.picker_hsv;
     let color = hsv_to_rgb(h, s, v);
@@ -637,9 +722,9 @@ fn picker_overlay(app: &TerminalPanel) -> iced::Element<'static, Message> {
                 button(text("应用").size(12.0).color(theme::TEXT))
                     .padding([5.0, 14.0])
                     .on_press(Message::GlowPickerApply)
-                    .style(|_t, st| iced::widget::button::Style {
+                    .style(move |_t, st| iced::widget::button::Style {
                         background: Some(iced::Background::Color(match st {
-                            button::Status::Hovered | button::Status::Pressed => theme::BLUE,
+                            button::Status::Hovered | button::Status::Pressed => accent,
                             _ => theme::BG_ELEVATED,
                         })),
                         border: iced::Border {
@@ -713,6 +798,7 @@ pub fn rgb_to_hsv(c: iced::Color) -> (f32, f32, f32) {
 // =============================================================================
 
 fn keybinds_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
+    let accent = app.accent_color();
     let mut rows = iced::widget::column![].spacing(0.0);
     // Detect conflicts (same combo bound to 2+ actions) to flag them red.
     for (action, combo) in &app.keybinds {
@@ -728,13 +814,13 @@ fn keybinds_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
             container(
                 text("按下新的快捷键… (Esc 取消)")
                     .size(12.0)
-                    .color(theme::BLUE),
+                    .color(accent),
             )
             .padding([5.0, 12.0])
-            .style(|_t| iced::widget::container::Style {
+            .style(move |_t| iced::widget::container::Style {
                 background: Some(iced::Background::Color(theme::BG_ELEVATED)),
                 border: iced::Border {
-                    color: theme::BLUE,
+                    color: accent,
                     width: 1.0,
                     radius: iced::border::Radius::from(6.0),
                 },
@@ -867,7 +953,18 @@ fn about_section() -> iced::Element<'static, Message> {
 
 /// Small filled button used by the Shell section (matches the rest of
 /// the settings page: flat surface, rounded, hover lift).
-fn action_button(label: &str, msg: Message, primary: bool) -> iced::Element<'static, Message> {
+pub fn action_button(label: &str, msg: Message, primary: bool) -> iced::Element<'static, Message> {
+    action_button_with(label, msg, primary, None)
+}
+
+/// Same as [`action_button`] but lets the caller supply the accent color
+/// (used where the panel's accent color is available).
+pub fn action_button_with(
+    label: &str,
+    msg: Message,
+    primary: bool,
+    accent: Option<iced::Color>,
+) -> iced::Element<'static, Message> {
     button(
         text(label.to_string())
             .size(12.0)
@@ -877,7 +974,7 @@ fn action_button(label: &str, msg: Message, primary: bool) -> iced::Element<'sta
     .on_press(msg)
     .style(move |_t, st| iced::widget::button::Style {
         background: Some(iced::Background::Color(if primary {
-            theme::BLUE
+            accent.unwrap_or(theme::BLUE)
         } else {
             match st {
                 button::Status::Hovered | button::Status::Pressed => theme::BG_ELEVATED,
@@ -920,11 +1017,17 @@ fn shell_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
 
     rows = rows.push(setting_row(
         "当前 Shell",
-        text(st.shell_display.clone())
-            .size(12.0)
-            .color(theme::TEXT)
-            .into(),
+        shell_selector_trigger(app, Message::SettingsShellMenuToggle),
     ));
+    rows = rows.push(
+        container(
+            text(st.shell_display.clone())
+                .size(11.0)
+                .color(theme::DIM),
+        )
+        .padding(crate::styles::pad4(0.0, 0.0, 8.0, 0.0))
+        .width(Length::Fill),
+    );
 
     if st.family == crate::shell_integration::Family::Fish {
         rows = rows.push(setting_row(
@@ -965,7 +1068,12 @@ fn shell_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
                 iced::widget::row![
                     action_button("复制命令", Message::ShellCopyInstallCmd, false),
                     action_button("粘贴到终端", Message::ShellPasteInstallCmd, false),
-                    action_button("粘贴并执行", Message::ShellRunInstallCmd, true),
+                    action_button_with(
+                        "粘贴并执行",
+                        Message::ShellRunInstallCmd,
+                        true,
+                        Some(app.accent_color()),
+                    ),
                 ]
                 .spacing(8.0)
                 .into(),
@@ -1005,7 +1113,22 @@ fn shell_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
         .width(Length::Fill),
     );
 
-    container(rows).padding(16.0).into()
+    let body: iced::Element<'static, Message> = if app.settings_shell_menu_open {
+        // Overlay the list right below the trigger, same pattern as the
+        // Appearance section's dropdown.
+        let menu = container(shell_menu(app))
+            .padding(crate::styles::pad4(128.0, 40.0, 0.0, 0.0))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_x(alignment::Horizontal::Right)
+            .align_y(alignment::Vertical::Top);
+        let base: iced::Element<'static, Message> =
+            container(rows).padding(16.0).into();
+        iced::Element::from(iced::widget::stack![base, menu])
+    } else {
+        container(rows).padding(16.0).into()
+    };
+    body
 }
 
 fn system_section(app: &TerminalPanel) -> iced::Element<'static, Message> {

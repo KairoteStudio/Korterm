@@ -40,6 +40,17 @@ pub enum Family {
 }
 
 impl Family {
+    /// Human-readable name, for the settings UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Family::Zsh => "zsh",
+            Family::Bash => "bash",
+            Family::Sh => "sh",
+            Family::Fish => "fish",
+            Family::Other => "未识别的 Shell",
+        }
+    }
+
     /// `true` when Korterm can add anything for this shell. fish already
     /// ships highlighting and completion, so it needs no integration.
     pub fn is_supported(self) -> bool {
@@ -558,17 +569,32 @@ mod tests {
     }
 
     #[test]
-    fn status_reports_missing_components() {
+    fn status_agrees_with_what_is_actually_installed() {
+        // Deliberately environment-independent: what matters is that the
+        // reported state matches the files on THIS machine, not a
+        // hardcoded "nothing is installed".
         let home = tmp_home("status");
         let st = status_in("/usr/bin/zsh", &home);
-        assert_eq!(st.family, Family::Zsh);
-        assert!(!st.enabled);
-        // This test machine's plugins are not installed under the temp
-        // home, so nothing should claim to be enabled.
-        assert!(matches!(st.syntax, Support::Missing));
+
+        let syntax_present = first_existing(&home, zsh_syntax_candidates()).is_some();
+        let suggest_present = first_existing(&home, zsh_suggest_candidates()).is_some();
+        assert_eq!(
+            st.syntax == Support::Missing,
+            !syntax_present,
+            "syntax state must match the presence of the plugin file"
+        );
+        assert_eq!(
+            st.suggest == Support::Missing,
+            !suggest_present,
+            "autosuggest state must match the presence of the plugin file"
+        );
+        assert!(!st.enabled, "no block was written for this temp home");
+
+        // The apt hint names exactly the pieces that are absent.
         let cmd = st.install_command();
-        assert!(cmd.starts_with("sudo apt install "), "got {cmd}");
-        assert!(cmd.contains("zsh-syntax-highlighting"));
+        assert_eq!(cmd.contains("zsh-syntax-highlighting"), !syntax_present);
+        assert_eq!(cmd.contains("zsh-autosuggestions"), !suggest_present);
+        assert_eq!(cmd.is_empty(), syntax_present && suggest_present);
     }
 
     #[test]

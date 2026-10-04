@@ -76,6 +76,16 @@ pub fn resolve_shell_path(pref: &str) -> String {
     }
 }
 
+/// One "组件 / 状态" line for the welcome window.
+fn status_line(label: &str, value: &str) -> Element<'static, Message> {
+    row![
+        text(label.to_string()).size(12.0).color(theme::TEXT),
+        iced::widget::Space::new().width(Length::Fill),
+        text(value.to_string()).size(12.0).color(theme::DIM),
+    ]
+    .into()
+}
+
 /// What a close is waiting on confirmation for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CloseTarget {
@@ -249,6 +259,18 @@ pub struct TerminalPanel {
     /// Pending destructive close, shown as a confirmation dialog when a
     /// program is still running in that terminal.
     pub close_confirm: Option<CloseTarget>,
+    /// The confirmation runs in its own OS window (not an in-app
+    /// overlay), so it can never be clipped by the terminal view or
+    /// stacked under the titlebar.
+    pub confirm_window: Option<iced::window::Id>,
+    /// First-run welcome window (see `first_run_done` in the config).
+    pub welcome_window: Option<iced::window::Id>,
+    /// Mirrors the config flag so the window is only offered once.
+    pub first_run_done: bool,
+    /// Independent accent color (0 = follow the top glow).
+    pub accent_override: u32,
+    /// Shell dropdown open in the Settings → Shell section.
+    pub settings_shell_menu_open: bool,
     /// Mirror of `config::Config::x11_backend`, kept in the panel so the
     /// settings row can render the current value.
     pub x11_backend: bool,
@@ -395,6 +417,20 @@ pub enum Message {
     TermCopy,
     TermPaste,
     TermSelectAll,
+    /// Ask for a confirmation window for this close target.
+    OpenConfirmWindow(CloseTarget),
+    /// Stop overriding the accent color and follow the top glow again.
+    AccentFollowGlow,
+    /// Toggle the shell dropdown in the Shell settings section.
+    SettingsShellMenuToggle,
+    /// Dismiss that dropdown (used by the shell closer).
+    SettingsShellMenuClose,
+    /// Open the first-run welcome window (no-op after it has been seen).
+    OpenWelcome,
+    /// Close the welcome window, remembering that it was seen.
+    WelcomeDismiss,
+    /// Jump to Settings → Shell from the welcome window.
+    WelcomeOpenShellSettings,
     /// Confirm (or cancel) the pending close.
     CloseConfirmAccept,
     CloseConfirmCancel,
@@ -506,6 +542,13 @@ impl Clone for Message {
             Message::TermFlushPtyResize => Message::TermFlushPtyResize,
             Message::TermCopy => Message::TermCopy,
             Message::TermPaste => Message::TermPaste,
+            Message::OpenConfirmWindow(t) => Message::OpenConfirmWindow(*t),
+            Message::AccentFollowGlow => Message::AccentFollowGlow,
+            Message::SettingsShellMenuToggle => Message::SettingsShellMenuToggle,
+            Message::SettingsShellMenuClose => Message::SettingsShellMenuClose,
+            Message::OpenWelcome => Message::OpenWelcome,
+            Message::WelcomeDismiss => Message::WelcomeDismiss,
+            Message::WelcomeOpenShellSettings => Message::WelcomeOpenShellSettings,
             Message::CloseConfirmAccept => Message::CloseConfirmAccept,
             Message::CloseConfirmCancel => Message::CloseConfirmCancel,
             Message::FileDropped(p) => Message::FileDropped(p.clone()),
@@ -605,6 +648,13 @@ impl std::fmt::Debug for Message {
             Message::TermFlushPtyResize => write!(f, "TermFlushPtyResize"),
             Message::TermCopy => write!(f, "TermCopy"),
             Message::TermPaste => write!(f, "TermPaste"),
+            Message::OpenConfirmWindow(t) => write!(f, "OpenConfirmWindow({t:?})"),
+            Message::AccentFollowGlow => write!(f, "AccentFollowGlow"),
+            Message::SettingsShellMenuToggle => write!(f, "SettingsShellMenuToggle"),
+            Message::SettingsShellMenuClose => write!(f, "SettingsShellMenuClose"),
+            Message::OpenWelcome => write!(f, "OpenWelcome"),
+            Message::WelcomeDismiss => write!(f, "WelcomeDismiss"),
+            Message::WelcomeOpenShellSettings => write!(f, "WelcomeOpenShellSettings"),
             Message::CloseConfirmAccept => write!(f, "CloseConfirmAccept"),
             Message::CloseConfirmCancel => write!(f, "CloseConfirmCancel"),
             Message::FileDropped(p) => write!(f, "FileDropped({})", p.display()),
@@ -695,6 +745,11 @@ impl TerminalPanel {
             term_default_shell: cfg.shell,
             shell_notice: None,
             close_confirm: None,
+            confirm_window: None,
+            welcome_window: None,
+            first_run_done: cfg.first_run_done,
+            settings_shell_menu_open: false,
+            accent_override: cfg.accent,
             x11_backend: cfg.x11_backend,
             pending_install: None,
             sidebar_dragging: false,
@@ -810,6 +865,183 @@ impl TerminalPanel {
         }
         self.terminal_focused = true;
         Task::none()
+    }
+
+    /// Apply a picker color to whichever slot it is editing.
+    fn set_picker_color(&mut self, which: u8, color: iced::Color) {
+        match which {
+            0 => self.glow.blue = color,
+            1 => self.glow.amber = color,
+            _ => self.accent_override = crate::glow::rgb_of(color),
+        }
+        self.glow.invalidate();
+        self.save_config();
+    }
+
+    /// Color used for emphasized controls.
+    ///
+    /// Defaults to the top glow so the whole UI reads as one design;
+    /// an explicit choice in Settings overrides it.
+    pub fn accent_color(&self) -> iced::Color {
+        if self.accent_override != 0 {
+            iced::Color::from_rgb8(
+                ((self.accent_override >> 16) & 0xFF) as u8,
+                ((self.accent_override >> 8) & 0xFF) as u8,
+                (self.accent_override & 0xFF) as u8,
+            )
+        } else {
+            self.glow.blue
+        }
+    }
+
+    /// Dismiss the confirmation window without acting on it.
+    fn close_confirm_window(&mut self) -> Task<Message> {
+        self.close_confirm = None;
+        match self.confirm_window.take() {
+            Some(id) => iced::window::close(id),
+            None => Task::none(),
+        }
+    }
+
+    /// Content for a secondary window, or `None` when `id` is the main
+    /// window (whose view the caller builds itself).
+    pub fn aux_window_view(&self, id: iced::window::Id) -> Option<Element<'static, Message>> {
+        if self.confirm_window == Some(id) {
+            return Some(self.confirm_window_view());
+        }
+        if self.welcome_window == Some(id) {
+            return Some(self.welcome_window_view());
+        }
+        None
+    }
+
+    /// First-run welcome window: says which shell is in use, what is
+    /// installed, and offers to install the rest in one click.
+    pub fn welcome_window_view(&self) -> Element<'static, Message> {
+        let st = &self.shell_status;
+        let shell_name = st.family.label();
+        let cmd = st.install_command();
+
+        let mut rows = iced::widget::column![]
+            .spacing(8.0)
+            .width(Length::Fill);
+
+        rows = rows.push(
+            text("欢迎使用 Korterm")
+                .size(16.0)
+                .color(theme::TEXT),
+        );
+        rows = rows.push(
+            text(format!(
+                "检测到当前 Shell：{} · {}",
+                st.shell_display, shell_name
+            ))
+            .size(12.0)
+            .color(theme::DIM),
+        );
+
+        let mut status = iced::widget::column![]
+            .spacing(4.0)
+            .width(Length::Fill);
+        status = status.push(status_line("语法高亮", st.syntax.label()));
+        if st.family == crate::shell_integration::Family::Zsh {
+            status = status.push(status_line("自动建议", st.suggest.label()));
+        }
+        status = status.push(status_line("Tab 补全", st.completion.label()));
+        rows = rows.push(status);
+
+        let mut actions = iced::widget::row![].spacing(8.0);
+        if !cmd.is_empty() {
+            actions = actions.push(
+                crate::settings::action_button(
+                    "安装缺失组件",
+                    Message::ShellRunInstallCmd,
+                    true,
+                ),
+            );
+        }
+        actions = actions.push(crate::settings::action_button(
+            "打开 Shell 设置",
+            Message::WelcomeOpenShellSettings,
+            false,
+        ));
+        actions = actions.push(crate::settings::action_button(
+            "以后再说",
+            Message::WelcomeDismiss,
+            false,
+        ));
+        rows = rows.push(actions);
+
+        rows = rows.push(
+            text("语法高亮与自动补全都由 Shell 提供，Korterm 负责检测并一键接线；安装组件需要管理员密码。")
+                .size(11.0)
+                .color(theme::DIM),
+        );
+
+        container(
+            container(rows.width(Length::Fill))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding([24.0, 26.0]),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_t| iced::widget::container::Style {
+            background: Some(iced::Background::Color(theme::BG_PANEL)),
+            ..Default::default()
+        })
+        .into()
+    }
+
+    /// Contents of the standalone confirmation window.
+    pub fn confirm_window_view(&self) -> Element<'static, Message> {
+        let (title, body) = match self.close_confirm {
+            Some(CloseTarget::Window) => (
+                "关闭 Korterm？",
+                "当前终端里还有程序在运行，关闭会直接终止它。",
+            ),
+            Some(CloseTarget::Tab(_)) => (
+                "关闭标签页？",
+                "这个终端里还有程序在运行，关闭会直接终止它。",
+            ),
+            None => ("确认", ""),
+        };
+
+        container(
+            container(
+                column![
+                    text(title).size(13.0).color(theme::TEXT),
+                    text(body).size(11.0).color(theme::DIM),
+                    row![
+                        button(text("取消").size(12.0).color(theme::TEXT))
+                            .padding([6.0, 16.0])
+                            .on_press(Message::CloseConfirmCancel)
+                            .style(crate::styles::dialog_button(false, self.accent_color())),
+                        button(text("仍然关闭").size(12.0).color(theme::BG_PRIMARY))
+                            .padding([6.0, 16.0])
+                            .on_press(Message::CloseConfirmAccept)
+                            .style(crate::styles::dialog_button(
+                                true,
+                                self.accent_color(),
+                            )),
+                    ]
+                    .spacing(8.0),
+                ]
+                .spacing(12.0)
+                .width(Length::Fill),
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding([20.0, 22.0])
+            .align_y(iced::alignment::Vertical::Center),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(|_t| iced::widget::container::Style {
+            background: Some(iced::Background::Color(theme::BG_PANEL)),
+            ..Default::default()
+        })
+        .into()
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -1062,11 +1294,7 @@ impl TerminalPanel {
             Message::GlowPickerClose => {
                 // Cancel: restore the color from when the picker opened.
                 if let Some((which, color)) = self.picker_backup.take() {
-                    match which {
-                        0 => self.glow.blue = color,
-                        _ => self.glow.amber = color,
-                    }
-                    self.glow.invalidate();
+                    self.set_picker_color(which, color);
                 }
                 self.picker = None;
                 self.picker_drag = 0;
@@ -1088,23 +1316,13 @@ impl TerminalPanel {
                     self.picker_hsv.1,
                     self.picker_hsv.2,
                 );
-                match which {
-                    0 => self.glow.blue = color,
-                    _ => self.glow.amber = color,
-                }
-                self.glow.invalidate();
-                self.save_config();
+                self.set_picker_color(which, color);
             }
             Message::GlowHueDrag(which, h) => {
                 self.picker_hsv.0 = h;
                 let color =
                     crate::settings::hsv_to_rgb(h, self.picker_hsv.1, self.picker_hsv.2);
-                match which {
-                    0 => self.glow.blue = color,
-                    _ => self.glow.amber = color,
-                }
-                self.glow.invalidate();
-                self.save_config();
+                self.set_picker_color(which, color);
             }
             Message::GlowIntensitySet(which, v) => {
                 let value = (v / 100.0).clamp(0.0, 1.0);
@@ -1220,8 +1438,7 @@ impl TerminalPanel {
                     && self.terminals.get(idx).map(|t| t.term.is_busy()).unwrap_or(false)
                 {
                     self.close_context_menu();
-                    self.close_confirm = Some(CloseTarget::Tab(idx));
-                    return Task::none();
+                    return self.update(Message::OpenConfirmWindow(CloseTarget::Tab(idx)));
                 }
                 self.close_confirm = None;
                 if idx < self.terminals.len() {
@@ -1606,34 +1823,106 @@ impl TerminalPanel {
             }
             Message::ToggleTerminal => {}
             Message::CloseWindow => {
-                if self.close_confirm.is_none() && self.active_term_busy() {
-                    self.close_confirm = Some(CloseTarget::Window);
-                    return Task::none();
+                if self.active_term_busy() {
+                    return self
+                        .update(Message::OpenConfirmWindow(CloseTarget::Window));
                 }
-                self.close_confirm = None;
                 if let Some(id) = self.main_window {
                     return iced::window::close(id);
                 }
             }
+            Message::AccentFollowGlow => {
+                self.accent_override = 0;
+                self.save_config();
+            }
+            Message::SettingsShellMenuToggle => {
+                self.settings_shell_menu_open = !self.settings_shell_menu_open;
+            }
+            Message::SettingsShellMenuClose => {
+                self.settings_shell_menu_open = false;
+            }
+            Message::OpenWelcome => {
+                if self.first_run_done || self.welcome_window.is_some() {
+                    return Task::none();
+                }
+                let (id, task) = iced::window::open(iced::window::Settings {
+                    size: iced::Size::new(560.0, 420.0),
+                    resizable: false,
+                    decorations: false,
+                    position: iced::window::Position::Centered,
+                    exit_on_close_request: false,
+                    ..Default::default()
+                });
+                self.welcome_window = Some(id);
+                return task.map(|_| Message::Nop);
+            }
+            Message::WelcomeDismiss => {
+                self.first_run_done = true;
+                self.save_config();
+                return match self.welcome_window.take() {
+                    Some(id) => iced::window::close(id),
+                    None => Task::none(),
+                };
+            }
+            Message::WelcomeOpenShellSettings => {
+                self.first_run_done = true;
+                self.save_config();
+                let close = match self.welcome_window.take() {
+                    Some(id) => iced::window::close(id),
+                    None => Task::none(),
+                };
+                self.settings_section = crate::settings::Section::Shell;
+                return Task::batch([
+                    close,
+                    self.update(Message::SettingsOpen),
+                ]);
+            }
+            Message::OpenConfirmWindow(target) => {
+                if self.confirm_window.is_some() {
+                    return Task::none();
+                }
+                self.close_confirm = Some(target);
+                let (id, task) = iced::window::open(iced::window::Settings {
+                    size: iced::Size::new(460.0, 208.0),
+                    resizable: false,
+                    // Own chrome, so it matches the rest of the app and
+                    // cannot be dismissed without answering.
+                    decorations: false,
+                    position: iced::window::Position::Centered,
+                    exit_on_close_request: false,
+                    ..Default::default()
+                });
+                self.confirm_window = Some(id);
+                return task.map(|_| Message::Nop);
+            }
             Message::CloseConfirmCancel => {
-                self.close_confirm = None;
+                return self.close_confirm_window();
             }
             Message::CloseConfirmAccept => {
                 let target = self.close_confirm.take();
-                match target {
+                self.close_confirm = None;
+                let close_task = match self.confirm_window.take() {
+                    Some(id) => iced::window::close(id),
+                    None => Task::none(),
+                };
+                return match target {
                     Some(CloseTarget::Window) => {
+                        let mut tasks = vec![close_task];
                         if let Some(id) = self.main_window {
-                            return iced::window::close(id);
+                            tasks.push(iced::window::close(id));
                         }
+                        Task::batch(tasks)
                     }
                     Some(CloseTarget::Tab(idx)) => {
                         // Force the close even if the tab still looks
                         // busy — the user just confirmed it.
-                        self.close_confirm = None;
-                        return self.update(Message::TermClose(idx));
+                        Task::batch([
+                            close_task,
+                            self.update(Message::TermClose(idx)),
+                        ])
                     }
-                    None => {}
-                }
+                    None => close_task,
+                };
             }
             Message::MinimizeWindow => {
                 if let Some(id) = self.main_window {
@@ -1652,6 +1941,11 @@ impl TerminalPanel {
             }
             Message::MainWindowReady(id) => {
                 self.main_window = Some(id);
+                // First launch only: point the user at the shell
+                // components Korterm can wire up for them.
+                if !self.first_run_done {
+                    return self.update(Message::OpenWelcome);
+                }
             }
             Message::Tick => {
                 // Advance cursor animations and blink
@@ -1900,6 +2194,8 @@ impl TerminalPanel {
                 .map(|(a, c)| (a.id().to_string(), c.clone()))
                 .collect(),
             x11_backend: self.x11_backend,
+            accent: self.accent_override,
+            first_run_done: self.first_run_done,
         });
     }
 
@@ -2434,66 +2730,6 @@ impl TerminalPanel {
             );
         }
 
-        // "A program is still running" confirmation. Sits above every
-        // other layer, and the shield swallows clicks so nothing behind
-        // it reacts while the dialog is up.
-        if let Some(target) = self.close_confirm {
-            let (title, body) = match target {
-                CloseTarget::Window => (
-                    "关闭 Korterm？",
-                    "当前终端里还有程序在运行，关闭会直接终止它。",
-                ),
-                CloseTarget::Tab(_) => (
-                    "关闭标签页？",
-                    "这个终端里还有程序在运行，关闭会直接终止它。",
-                ),
-            };
-            let panel = container(
-                column![
-                    text(title).size(13.0).color(theme::TEXT),
-                    text(body).size(11.0).color(theme::DIM),
-                    row![
-                        button(text("取消").size(12.0).color(theme::TEXT))
-                            .padding([6.0, 14.0])
-                            .on_press(Message::CloseConfirmCancel)
-                            .style(crate::styles::dialog_button(false)),
-                        button(text("仍然关闭").size(12.0).color(theme::BG_PRIMARY))
-                            .padding([6.0, 14.0])
-                            .on_press(Message::CloseConfirmAccept)
-                            .style(crate::styles::dialog_button(true)),
-                    ]
-                    .spacing(8.0),
-                ]
-                .spacing(10.0)
-                .width(Length::Fill),
-            )
-            .width(Pixels(300.0))
-            .padding([16.0, 18.0])
-            .style(|_t| iced::widget::container::Style {
-                background: Some(iced::Background::Color(theme::BG_PANEL)),
-                border: iced::Border {
-                    color: theme::BORDER,
-                    width: 1.0,
-                    radius: iced::border::Radius::from(12.0),
-                },
-                ..Default::default()
-            });
-
-            layered = layered.push(
-                mouse_area(container(iced::widget::Space::new())
-                    .width(Length::Fill)
-                    .height(Length::Fill))
-                .on_press(Message::CloseConfirmCancel),
-            );
-            layered = layered.push(
-                container(panel)
-                    .width(Length::Fill)
-                    .height(Length::Fill)
-                    .center_x(Length::Fill)
-                    .center_y(Length::Fill),
-            );
-        }
-
         // Assemble island (no extra header — all controls are in the titlebar)
         let mut island = column![
             layered,
@@ -2615,14 +2851,30 @@ impl TerminalPanel {
                 // The WM close button, Alt+F4 and the session manager all
                 // land here rather than on our titlebar button, so this
                 // is the path most closes actually take.
-                if self.close_confirm.is_none() && self.active_term_busy() {
-                    self.close_confirm = Some(CloseTarget::Window);
-                    return Task::none();
+                //
+                // iced's CloseRequested carries no window id, but while
+                // the confirmation is open it owns the keyboard focus
+                // and the pointer, so any close request is aimed at it.
+                if self.confirm_window.is_some() {
+                    return self.close_confirm_window();
                 }
-                self.close_confirm = None;
+                if self.active_term_busy() {
+                    return self
+                        .update(Message::OpenConfirmWindow(CloseTarget::Window));
+                }
                 if let Some(id) = self.main_window {
                     return iced::window::close(id);
                 }
+            }
+            Event::Window(iced::window::Event::Closed) => {
+                // Keep pending state from outliving its window.
+                if self.welcome_window.is_some() {
+                    self.welcome_window = None;
+                    self.first_run_done = true;
+                    self.save_config();
+                }
+                self.confirm_window = None;
+                self.close_confirm = None;
             }
             Event::Window(iced::window::Event::Resized(size)) => {
                 self.window_size = (size.width, size.height);

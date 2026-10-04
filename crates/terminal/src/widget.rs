@@ -134,11 +134,19 @@ pub fn cell_width() -> f32 {
     measured_char_width().unwrap_or(CELL_W)
 }
 
-pub fn pixel_to_cell(term: &Terminal, mx: f32, my: f32, content_h: f32) -> (usize, usize) {
+/// Map a pointer position (canvas-local pixels) to a grid cell.
+///
+/// The mapping is the **exact inverse** of how `TerminalCanvas` paints:
+/// row `vy` is drawn at `PAD_Y + vy * CELL_H` from the canvas top and
+/// column `cx` at `PAD_X + cx * char_w`. Anything else drifts — an
+/// earlier version derived the text origin from the panel height
+/// (`content_h - rows * CELL_H - PAD_Y`), i.e. it assumed the text was
+/// bottom-anchored while the renderer draws it top-anchored, so clicks
+/// landed up to a full row off.
+pub fn pixel_to_cell(term: &Terminal, mx: f32, my: f32) -> (usize, usize) {
     let char_w = cell_width();
     let rows = term.buf.rows;
-    let top_of_text = content_h - rows as f32 * CELL_H - PAD_Y;
-    let vy = ((my - top_of_text) / CELL_H).floor() as i32;
+    let vy = ((my - PAD_Y) / CELL_H).floor() as i32;
     let vy = vy.clamp(0, rows as i32 - 1) as usize;
     let cx = ((mx - PAD_X) / char_w).floor() as i32;
     let cx = cx.clamp(0, term.buf.cols as i32 - 1) as usize;
@@ -404,4 +412,73 @@ pub fn grid_size_for_pixels(width: f32, height: f32) -> (usize, usize) {
     let cols = (avail_w / char_w).floor() as usize;
     let rows = (avail_h / CELL_H).floor() as usize;
     (cols.max(1), rows.max(1))
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A terminal with a known grid, so click→cell mapping can be pinned
+    /// against the renderer's own row/column formula.
+    fn grid_term(cols: usize, rows: usize) -> Terminal {
+        Terminal {
+            buf: crate::buffer::Buffer::new(cols, rows, 100),
+            parser: crate::parser::Parser::new(),
+            pty: None,
+            title: String::new(),
+            prev_cursor: (0, 0),
+            cursor_anim_t: 1.0,
+            cursor_anim_active: false,
+            cursor_blink_visible: true,
+            last_blink: std::time::Instant::now(),
+            selection: None,
+            pending_pty_resize: None,
+            view_offset: 0,
+            search: None,
+        }
+    }
+
+    #[test]
+    fn click_maps_back_to_the_row_that_was_painted() {
+        let t = grid_term(80, 24);
+        let char_w = cell_width();
+        for vy in 0..24usize {
+            for cx in [0usize, 1, 17, 79] {
+                // Just inside the middle of the cell that the renderer
+                // paints at (PAD_X + cx*char_w, PAD_Y + vy*CELL_H).
+                let mx = PAD_X + (cx as f32 + 0.5) * char_w;
+                let my = PAD_Y + (vy as f32 + 0.5) * CELL_H;
+                assert_eq!(
+                    pixel_to_cell(&t, mx, my),
+                    (cx, vy),
+                    "click in the middle of cell ({cx},{vy}) must select it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clicks_outside_the_grid_clamp_to_the_edge_cells() {
+        let t = grid_term(80, 24);
+        let char_w = cell_width();
+        // Above the first row and left of the first column.
+        assert_eq!(pixel_to_cell(&t, -100.0, -100.0), (0, 0));
+        // Below the last row and right of the last column.
+        let (cx, vy) = pixel_to_cell(&t, 10_000.0, 10_000.0);
+        assert_eq!((cx, vy), (79, 23));
+    }
+
+    #[test]
+    fn click_mapping_does_not_depend_on_the_viewport_scroll() {
+        // Scrolling must never move the click mapping: a click at a
+        // pixel selects the cell painted there, whatever row that is.
+        let mut t = grid_term(80, 24);
+        for _ in 0..40 {
+            t.buf.line_feed();
+        }
+        t.scroll_lines(-5);
+        let char_w = cell_width();
+        let vy = 7usize;
+        let my = PAD_Y + (vy as f32 + 0.5) * CELL_H;
+        assert_eq!(pixel_to_cell(&t, PAD_X + char_w * 3.5, my), (3, vy));
+    }
 }

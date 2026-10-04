@@ -135,6 +135,8 @@ pub enum Message {
     SelectMove(f32, f32),
     SelectRelease,
     Write(Vec<u8>),
+    /// File dropped from the file manager → insert its quoted path.
+    FileDropped(std::path::PathBuf),
     Copy,
     Paste,
     SelectAll,
@@ -163,6 +165,7 @@ impl Clone for Message {
             Message::SelectMove(x, y) => Message::SelectMove(*x, *y),
             Message::SelectRelease => Message::SelectRelease,
             Message::Write(b) => Message::Write(b.clone()),
+            Message::FileDropped(p) => Message::FileDropped(p.clone()),
             Message::Copy => Message::Copy,
             Message::Paste => Message::Paste,
             Message::SelectAll => Message::SelectAll,
@@ -332,11 +335,9 @@ impl iced::Program for QuickProgram {
             }
             Message::SelectMove(x, y) => {
                 state.mouse_pos = (x, y);
-                if state.selecting && state.content_size.1 > 0.0 {
+                if state.selecting {
                     if let Some(term) = &mut state.term {
-                        let (cx, vy) = terminal::widget::pixel_to_cell(
-                            term, x, y, state.content_size.1,
-                        );
+                        let (cx, vy) = terminal::widget::pixel_to_cell(term, x, y);
                         if term.selection.is_none() {
                             term.start_selection(cx, vy);
                         } else {
@@ -462,6 +463,22 @@ impl iced::Program for QuickProgram {
                 state.focused = false;
                 if was && !state.hidden {
                     return hide_quick(state);
+                }
+            }
+            Message::FileDropped(path) => {
+                // Same behaviour as the main window: drop a file in and
+                // its shell-quoted path lands on the prompt.
+                let alive = state
+                    .term
+                    .as_mut()
+                    .map(|t| t.is_alive())
+                    .unwrap_or(false);
+                if alive {
+                    let mut text = terminal::shell_quote_path(&path);
+                    text.push(' ');
+                    if let Some(term) = state.term.as_mut() {
+                        term.input(text.as_bytes());
+                    }
                 }
             }
             Message::IpcToggle => {
@@ -628,6 +645,9 @@ impl iced::Program for QuickProgram {
                 }
                 iced::Event::Window(window::Event::Unfocused) => {
                     Some(Message::FocusLost)
+                }
+                iced::Event::Window(window::Event::FileDropped(path)) => {
+                    Some(Message::FileDropped(path.clone()))
                 }
                 _ => None,
             }),

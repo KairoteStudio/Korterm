@@ -677,6 +677,35 @@ impl Terminal {
     }
 }
 
+/// Quote a filesystem path so it can be typed at a POSIX shell prompt
+/// without the shell reinterpreting any of it.
+///
+/// Plain paths (`/home/me/file.txt`) pass through untouched; anything
+/// with spaces, quotes or glob characters is single-quoted, with embedded
+/// single quotes escaped the POSIX way (`'\''`). This is what gets
+/// written when a file is dropped from the file manager onto the window.
+pub fn shell_quote_path(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy();
+    let plain = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "-_+@%:,./~".contains(c));
+    if plain {
+        return s.into_owned();
+    }
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for c in s.chars() {
+        if c == '\'' {
+            // Close the quote, emit an escaped quote, reopen.
+            out.push_str("'\\''");
+        } else {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Return `(start, end)` with `start <= end` (row-major, then cell).
 pub fn normalize(sel: Selection) -> ((usize, usize), (usize, usize)) {
     let a = sel.start;
@@ -843,5 +872,68 @@ mod tests {
         // hidden — matching xterm/GNOME Terminal.
         t.view_offset = 3;
         assert!(t.buf.cursor_y + t.view_offset >= t.buf.rows);
+    }
+}
+
+#[cfg(test)]
+mod path_quote_tests {
+    use super::shell_quote_path;
+    use std::path::Path;
+
+    #[test]
+    fn plain_paths_are_not_quoted() {
+        for p in ["/home/me/file.txt", "/tmp/a-b_c.1", "relative/path"] {
+            assert_eq!(shell_quote_path(Path::new(p)), p);
+        }
+    }
+
+    #[test]
+    fn paths_with_spaces_are_single_quoted() {
+        assert_eq!(
+            shell_quote_path(Path::new("/home/me/My Documents/a.txt")),
+            "'/home/me/My Documents/a.txt'"
+        );
+    }
+
+    #[test]
+    fn glob_and_shell_metacharacters_are_neutralised() {
+        // Without quoting, `rm $HOME/*` style characters would expand.
+        assert_eq!(
+            shell_quote_path(Path::new("/tmp/a*b?c.txt")),
+            "'/tmp/a*b?c.txt'"
+        );
+        assert_eq!(
+            shell_quote_path(Path::new("/tmp/$(whoami)")),
+            "'/tmp/$(whoami)'"
+        );
+    }
+
+    #[test]
+    fn embedded_single_quotes_use_the_posix_escape() {
+        // 'it'\''s' → shell sees exactly  it's
+        assert_eq!(
+            shell_quote_path(Path::new("/tmp/it's here.txt")),
+            "'/tmp/it'\\''s here.txt'"
+        );
+    }
+
+    #[test]
+    fn quoting_round_trips_through_a_real_shell() {
+        // Feed the quoted forms through `printf %s` and compare with the
+        // original bytes — proves the quoting is shell-correct, not just
+        // plausible-looking.
+        for raw in ["/tmp/it's here.txt", "/tmp/a b*c", "/tmp/$(x) `y` \"z\""] {
+            let quoted = shell_quote_path(Path::new(raw));
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("printf %s {quoted}"))
+                .output()
+                .expect("sh available");
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                raw,
+                "shell did not reproduce {raw}"
+            );
+        }
     }
 }

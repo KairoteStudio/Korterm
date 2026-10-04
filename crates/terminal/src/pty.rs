@@ -52,7 +52,19 @@ impl PtySession {
         // otherwise let portable-pty pick the default ($SHELL on Unix,
         // cmd/PowerShell on Windows).
         let mut cmd = match program {
-            Some(prog) => CommandBuilder::new(prog),
+            Some(prog) => {
+                let mut cmd = CommandBuilder::new(prog);
+                // portable-pty only passes a leading `-` in argv[0] for
+                // `new_default_prog()`. An explicitly configured shell
+                // would therefore start as a *non-login* shell and skip
+                // .zprofile / .bash_profile — where users usually keep
+                // PATH and toolchain setup. `-l` gives the same login
+                // behaviour every other terminal provides.
+                if is_login_capable(prog) {
+                    cmd.arg("-l");
+                }
+                cmd
+            }
             None => CommandBuilder::new_default_prog(),
         };
         let cwd_path = cwd
@@ -60,6 +72,12 @@ impl PtySession {
             .unwrap_or_else(|| dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/")));
         cmd.cwd(cwd_path);
         cmd.env("TERM", "xterm-256color");
+        // Truecolor + identification: tools that colour their output
+        // (bat, ls, fzf, delta…) check COLORTERM, and shell plugins
+        // branch on TERM_PROGRAM / KORTERM to tune themselves.
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("TERM_PROGRAM", "korterm");
+        cmd.env("KORTERM", "1");
 
         let child = pty_pair
             .slave
@@ -171,6 +189,16 @@ impl PtySession {
             Err(_) => false,
         }
     }
+}
+
+/// Shells that accept `-l` for login mode. Anything else (pwsh,
+/// nushell, a custom wrapper…) is spawned untouched.
+fn is_login_capable(program: &str) -> bool {
+    let base = program.rsplit('/').next().unwrap_or(program);
+    matches!(
+        base,
+        "zsh" | "bash" | "sh" | "dash" | "ash" | "ksh" | "mksh" | "fish"
+    )
 }
 
 impl Drop for PtySession {

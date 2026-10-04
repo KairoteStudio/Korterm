@@ -26,6 +26,7 @@ pub const GLOW_PRESETS: [u32; 8] = [
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Section {
     Appearance,
+    Shell,
     Glow,
     Keybinds,
     About,
@@ -35,6 +36,7 @@ impl Section {
     fn label(self) -> &'static str {
         match self {
             Section::Appearance => "外观",
+            Section::Shell => "Shell",
             Section::Glow => "光晕",
             Section::Keybinds => "快捷键",
             Section::About => "关于",
@@ -44,14 +46,16 @@ impl Section {
     fn icon(self) -> Icon {
         match self {
             Section::Appearance => Icon::PanelRight,
+            Section::Shell => Icon::Terminal,
             Section::Glow => Icon::LayoutGrid,
             Section::Keybinds => Icon::Square,
             Section::About => Icon::Info,
         }
     }
 
-    pub const ALL: [Section; 4] = [
+    pub const ALL: [Section; 5] = [
         Section::Appearance,
+        Section::Shell,
         Section::Glow,
         Section::Keybinds,
         Section::About,
@@ -90,6 +94,7 @@ pub fn settings_panel(app: &TerminalPanel) -> iced::Element<'static, Message> {
 
     let content = container(match app.settings_section {
         Section::Appearance => appearance_section(app),
+        Section::Shell => shell_section(app),
         Section::Glow => glow_section(app),
         Section::Keybinds => keybinds_section(app),
         Section::About => about_section(),
@@ -835,7 +840,10 @@ fn about_section() -> iced::Element<'static, Message> {
         iced::widget::column![
             section_title("关于"),
             setting_row("应用", text("Korterm").size(12.0).color(theme::TEXT).into()),
-            setting_row("版本", text("1.0.0").size(12.0).color(theme::DIM).into()),
+            setting_row(
+                "版本",
+                text(env!("CARGO_PKG_VERSION")).size(12.0).color(theme::DIM).into()
+            ),
             setting_row(
                 "快捷终端",
                 text("绑定系统快捷键到 `korterm --quick`").size(12.0).color(theme::DIM).into()
@@ -846,6 +854,152 @@ fn about_section() -> iced::Element<'static, Message> {
     )
     .padding(16.0)
     .into()
+}
+
+// =============================================================================
+// Shell integration
+// =============================================================================
+
+/// Small filled button used by the Shell section (matches the rest of
+/// the settings page: flat surface, rounded, hover lift).
+fn action_button(label: &str, msg: Message, primary: bool) -> iced::Element<'static, Message> {
+    button(
+        text(label.to_string())
+            .size(12.0)
+            .color(if primary { theme::BG_PRIMARY } else { theme::TEXT }),
+    )
+    .padding([7.0, 14.0])
+    .on_press(msg)
+    .style(move |_t, st| iced::widget::button::Style {
+        background: Some(iced::Background::Color(if primary {
+            theme::BLUE
+        } else {
+            match st {
+                button::Status::Hovered | button::Status::Pressed => theme::BG_ELEVATED,
+                _ => Color::TRANSPARENT,
+            }
+        })),
+        border: iced::Border {
+            color: if primary {
+                Color::TRANSPARENT
+            } else {
+                theme::BORDER
+            },
+            width: if primary { 0.0 } else { 1.0 },
+            radius: iced::border::Radius::from(6.0),
+        },
+        ..Default::default()
+    })
+    .into()
+}
+
+fn support_label(s: crate::shell_integration::Support) -> iced::Element<'static, Message> {
+    let color = if s == crate::shell_integration::Support::Missing {
+        theme::DIM
+    } else if s == crate::shell_integration::Support::Enabled {
+        theme::TEXT
+    } else {
+        theme::DIM
+    };
+    text(s.label().to_string()).size(12.0).color(color).into()
+}
+
+fn shell_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
+    let st = &app.shell_status;
+
+    let mut rows = iced::widget::column![]
+        .spacing(2.0)
+        .width(Length::Fill);
+
+    rows = rows.push(section_title("Shell"));
+
+    rows = rows.push(setting_row(
+        "当前 Shell",
+        text(st.shell_display.clone())
+            .size(12.0)
+            .color(theme::TEXT)
+            .into(),
+    ));
+
+    if st.family == crate::shell_integration::Family::Fish {
+        rows = rows.push(setting_row(
+            "语法高亮 / 补全",
+            text("fish 自带，无需配置")
+                .size(12.0)
+                .color(theme::DIM)
+                .into(),
+        ));
+    } else if !st.family.is_supported() {
+        rows = rows.push(setting_row(
+            "集成",
+            text("暂不支持该 Shell")
+                .size(12.0)
+                .color(theme::DIM)
+                .into(),
+        ));
+    } else {
+        rows = rows.push(setting_row("语法高亮", support_label(st.syntax)));
+        if st.family == crate::shell_integration::Family::Zsh {
+            rows = rows.push(setting_row("自动建议", support_label(st.suggest)));
+        }
+        rows = rows.push(setting_row("Tab 补全", support_label(st.completion)));
+
+        rows = rows.push(setting_row(
+            "启用集成",
+            if st.enabled {
+                action_button("移除", Message::ShellIntegrationDisable, false)
+            } else {
+                action_button("启用", Message::ShellIntegrationEnable, true)
+            },
+        ));
+
+        let cmd = st.install_command();
+        if !cmd.is_empty() {
+            rows = rows.push(setting_row(
+                "安装缺失组件",
+                iced::widget::row![
+                    action_button("复制命令", Message::ShellCopyInstallCmd, false),
+                    action_button("粘贴到终端", Message::ShellPasteInstallCmd, false),
+                ]
+                .spacing(8.0)
+                .into(),
+            ));
+            rows = rows.push(
+                container(
+                    text(cmd.clone())
+                        .size(11.0)
+                        .color(theme::DIM)
+                        .font(iced::Font::MONOSPACE),
+                )
+                .padding(crate::styles::pad4(0.0, 0.0, 8.0, 0.0))
+                .width(Length::Fill),
+            );
+        }
+    }
+
+    if let Some(notice) = &app.shell_notice {
+        rows = rows.push(
+            container(
+                text(notice.clone())
+                    .size(11.0)
+                    .color(theme::DIM),
+            )
+            .padding(crate::styles::pad4(0.0, 0.0, 8.0, 0.0))
+            .width(Length::Fill),
+        );
+    }
+
+    rows = rows.push(
+        container(
+            text("启用后 Korterm 会写入 ~/.config/korterm/shell-integration/ 并在你的 shell 配置末尾加载它；首次修改前会自动备份，可随时移除。")
+                .size(11.0)
+                .color(theme::DIM),
+        )
+        .padding(crate::styles::pad4(10.0, 0.0, 0.0, 0.0))
+        .width(Length::Fill),
+    );
+
+    container(rows).padding(16.0).into()
 }
 
 // =============================================================================

@@ -13,6 +13,7 @@
 use iced::alignment::{Horizontal, Vertical};
 use iced::widget::{button, column, container, mouse_area, row, scrollable, stack, text};
 use iced::{Alignment, Color, Element, Event, Length, Pixels, Subscription, Task};
+use std::path::Path;
 
 use crate::icons::Icon;
 use crate::styles;
@@ -45,6 +46,33 @@ pub fn tab_pulse(app: &TerminalPanel, idx: usize) -> f32 {
     match app.tab_settle {
         Some((i, t)) if i == idx => (1.0 - t / TAB_SETTLE_MS).clamp(0.0, 1.0),
         _ => 0.0,
+    }
+}
+
+/// The shell binary Korterm will actually spawn for `pref`.
+///
+/// An empty preference (or the "系统默认" placeholder) means "use the
+/// user's login shell", which is what the PTY layer does. Settings →
+/// Shell shows this resolved path so the status matches reality.
+pub fn resolve_shell_path(pref: &str) -> String {
+    let pref = pref.trim();
+    if pref.is_empty() || pref == "系统默认" {
+        std::env::var("SHELL")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/bin/sh".into())
+    } else if pref.contains('/') {
+        pref.to_string()
+    } else {
+        // Bare name: look it up on PATH, fall back to the name itself so
+        // status detection still classifies the family correctly.
+        std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .map(|dir| Path::new(dir).join(pref))
+            .find(|c| c.is_file())
+            .map(|c| c.display().to_string())
+            .unwrap_or_else(|| format!("/bin/{pref}"))
     }
 }
 
@@ -203,6 +231,12 @@ pub struct TerminalPanel {
     pub term_last_char_w: f32,
     /// Remembered shell preference ("" = system default).
     pub term_default_shell: String,
+    /// Cached snapshot of the shell-integration state shown in Settings →
+    /// Shell. Refreshed on demand (settings open / section change /
+    /// enable / disable) instead of every frame.
+    pub shell_status: crate::shell_integration::Status,
+    /// Result of the last enable/disable attempt, shown in that section.
+    pub shell_notice: Option<String>,
     /// Whether the sidebar resize handle is being dragged.
     pub sidebar_dragging: bool,
     /// Active settings section (left nav).
@@ -342,6 +376,16 @@ pub enum Message {
     TermCopy,
     TermPaste,
     TermSelectAll,
+    /// A file/folder was dropped onto the window from a file manager.
+    /// The path is shell-quoted and written to the focused PTY.
+    FileDropped(std::path::PathBuf),
+    /// Shell section: write/remove the Korterm rc block.
+    ShellIntegrationEnable,
+    ShellIntegrationDisable,
+    /// Copy the apt command for missing shell components.
+    ShellCopyInstallCmd,
+    /// Type that command into the focused terminal (no auto-run).
+    ShellPasteInstallCmd,
     ToggleTerminal,
     CloseWindow,
     MinimizeWindow,
@@ -434,6 +478,11 @@ impl Clone for Message {
             Message::TermFlushPtyResize => Message::TermFlushPtyResize,
             Message::TermCopy => Message::TermCopy,
             Message::TermPaste => Message::TermPaste,
+            Message::FileDropped(p) => Message::FileDropped(p.clone()),
+            Message::ShellIntegrationEnable => Message::ShellIntegrationEnable,
+            Message::ShellIntegrationDisable => Message::ShellIntegrationDisable,
+            Message::ShellCopyInstallCmd => Message::ShellCopyInstallCmd,
+            Message::ShellPasteInstallCmd => Message::ShellPasteInstallCmd,
             Message::TermSelectAll => Message::TermSelectAll,
             Message::ToggleTerminal => Message::ToggleTerminal,
             Message::CloseWindow => Message::CloseWindow,
@@ -523,6 +572,11 @@ impl std::fmt::Debug for Message {
             Message::TermFlushPtyResize => write!(f, "TermFlushPtyResize"),
             Message::TermCopy => write!(f, "TermCopy"),
             Message::TermPaste => write!(f, "TermPaste"),
+            Message::FileDropped(p) => write!(f, "FileDropped({})", p.display()),
+            Message::ShellIntegrationEnable => write!(f, "ShellIntegrationEnable"),
+            Message::ShellIntegrationDisable => write!(f, "ShellIntegrationDisable"),
+            Message::ShellCopyInstallCmd => write!(f, "ShellCopyInstallCmd"),
+            Message::ShellPasteInstallCmd => write!(f, "ShellPasteInstallCmd"),
             Message::TermSelectAll => write!(f, "TermSelectAll"),
             Message::ToggleTerminal => write!(f, "ToggleTerminal"),
             Message::CloseWindow => write!(f, "CloseWindow"),
@@ -599,7 +653,9 @@ impl TerminalPanel {
             term_pty_resize_pending: false,
             main_window: None,
             term_last_char_w: 0.0,
+            shell_status: crate::shell_integration::status(&resolve_shell_path(&cfg.shell)),
             term_default_shell: cfg.shell,
+            shell_notice: None,
             sidebar_dragging: false,
             settings_section: crate::settings::Section::Appearance,
             picker: None,
@@ -811,6 +867,13 @@ impl TerminalPanel {
                 self.search_closing = false;
                 self.keybind_capture = None;
                 self.close_actions_menu();
+                // Component availability can change between runs (the
+                // user installs a plugin, edits .zshrc, …) — re-detect
+                // when the page opens rather than only at startup.
+                self.shell_status = crate::shell_integration::status(
+                    &resolve_shell_path(&self.term_default_shell),
+                );
+                self.shell_notice = None;
                 // Reuse the settings session if one exists; otherwise
                 // create it as a real tab (draggable, closable like any
                 // other tab).
@@ -848,6 +911,11 @@ impl TerminalPanel {
             Message::SettingsSection(s) => {
                 self.settings_section = s;
                 self.picker = None;
+                if s == crate::settings::Section::Shell {
+                    self.shell_status = crate::shell_integration::status(
+                        &resolve_shell_path(&self.term_default_shell),
+                    );
+                }
             }
             Message::ShellCycle => {
                 // Toggle the shell dropdown menu (k-select style).
@@ -858,6 +926,8 @@ impl TerminalPanel {
             }
             Message::ShellSelect(shell) => {
                 self.shell_menu_open = false;
+                self.shell_status =
+                    crate::shell_integration::status(&resolve_shell_path(&shell));
                 self.term_default_shell = if shell == "系统默认" {
                     String::new()
                 } else {
@@ -1105,15 +1175,12 @@ impl TerminalPanel {
             Message::TermSelectMove(x, y) => {
                 self.term_mouse = (x, y);
                 if self.term_selecting {
-                    let (_cw, ch) = self.term_content_size;
-                    if ch > 0.0 {
-                        if let Some(term) = self.active_term_mut() {
-                            let (cx, vy) = terminal::widget::pixel_to_cell(&term.term, x, y, ch);
-                            if term.term.selection.is_none() {
-                                term.term.start_selection(cx, vy);
-                            } else {
-                                term.term.extend_selection(cx, vy);
-                            }
+                    if let Some(term) = self.active_term_mut() {
+                        let (cx, vy) = terminal::widget::pixel_to_cell(&term.term, x, y);
+                        if term.term.selection.is_none() {
+                            term.term.start_selection(cx, vy);
+                        } else {
+                            term.term.extend_selection(cx, vy);
                         }
                     }
                 }
@@ -1367,6 +1434,59 @@ impl TerminalPanel {
                 self.close_context_menu();
                 if let Some(term) = self.active_term_mut() {
                     term.term.select_all();
+                }
+            }
+            Message::ShellIntegrationEnable => {
+                let shell = resolve_shell_path(&self.term_default_shell);
+                self.shell_notice =
+                    match crate::shell_integration::enable(&shell) {
+                        Ok(()) => Some("已启用 · 新开的标签页生效".into()),
+                        Err(e) => Some(format!("启用失败：{e}")),
+                    };
+                self.shell_status = crate::shell_integration::status(&shell);
+            }
+            Message::ShellIntegrationDisable => {
+                let shell = resolve_shell_path(&self.term_default_shell);
+                self.shell_notice = match crate::shell_integration::disable(&shell) {
+                    Ok(()) => Some("已移除 · 新开的标签页生效".into()),
+                    Err(e) => Some(format!("移除失败：{e}")),
+                };
+                self.shell_status = crate::shell_integration::status(&shell);
+            }
+            Message::ShellCopyInstallCmd => {
+                let cmd = self.shell_status.install_command();
+                if !cmd.is_empty() {
+                    return iced::clipboard::write(cmd);
+                }
+            }
+            Message::ShellPasteInstallCmd => {
+                let cmd = self.shell_status.install_command();
+                if !cmd.is_empty() {
+                    let mut text = cmd;
+                    text.push(' ');
+                    if let Some(term) = self.active_term_mut() {
+                        term.term.input(text.as_bytes());
+                    }
+                    self.terminal_focused = true;
+                }
+            }
+            Message::FileDropped(path) => {
+                // A file/folder dragged in from the file manager inserts
+                // its shell-quoted path, the way every other terminal
+                // does. Only into a live shell — never into the
+                // settings page, and never into a dead PTY.
+                let ready = self
+                    .active_term_mut()
+                    .map(|t| t.kind == SessionKind::Terminal && t.term.is_alive())
+                    .unwrap_or(false);
+                if ready {
+                    let mut text = terminal::shell_quote_path(&path);
+                    text.push(' ');
+                    if let Some(term) = self.active_term_mut() {
+                        term.term.input(text.as_bytes());
+                    }
+                    self.terminal_focused = true;
+                    self.close_context_menu();
                 }
             }
             Message::ToggleTerminal => {}
@@ -1885,13 +2005,9 @@ impl TerminalPanel {
         let Some(idx) = self.active_terminal else {
             return;
         };
-        let (_cw, ch) = self.term_content_size;
-        if ch <= 0.0 {
-            return;
-        }
         let term = &self.terminals[idx].term;
         let (x, y) = self.term_mouse;
-        let (cx, vy) = terminal::widget::pixel_to_cell(term, x, y, ch);
+        let (cx, vy) = terminal::widget::pixel_to_cell(term, x, y);
         let word = word_at_cell(term, cx, vy);
         if let Some(target) = classify_jump_target(&word) {
             // Fire-and-forget; xdg-open returns immediately on Linux.
@@ -1990,12 +2106,14 @@ impl TerminalPanel {
             let (cf, rf) = t.term.cursor_render_pos()?;
             let cw = terminal::widget::cell_width();
             let chh = terminal::widget::cell_height();
-            let top =
-                self.term_content_size.1 - t.term.buf.rows as f32 * chh
-                    - terminal::widget::PAD_Y;
+            // Row `rf` is painted at PAD_Y + rf * cell_height from the
+            // canvas top — same origin the renderer uses. Deriving the
+            // origin from the panel height (bottom-anchored) put the IME
+            // caret up to a full row off, and dragged the whole click
+            // mapping with it.
             Some(iced::Rectangle {
                 x: terminal::widget::PAD_X + cf * cw,
-                y: top + rf * chh,
+                y: terminal::widget::PAD_Y + rf * chh,
                 width: cw,
                 height: chh,
             })
@@ -2268,6 +2386,9 @@ impl TerminalPanel {
         let events = iced::event::listen_with(|event, status, _id| match (&status, &event) {
             (_, Event::Window(iced::window::Event::Resized(_size))) => {
                 Some(Message::Event(event))
+            }
+            (_, Event::Window(iced::window::Event::FileDropped(path))) => {
+                Some(Message::FileDropped(path.clone()))
             }
             (_, Event::Keyboard(k)) => Some(keyboard_event_to_message(k, status)),
             (

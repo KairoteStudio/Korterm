@@ -6,6 +6,7 @@ mod config;
 mod keybinds;
 mod quick;
 mod settings;
+mod shell_integration;
 mod theme;
 mod icons;
 mod styles;

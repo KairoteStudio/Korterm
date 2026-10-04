@@ -27,6 +27,13 @@ pub struct Config {
     pub glow_intensity_bottom: f32,
     /// Shortcut overrides: `"copy"` → `"ctrl+shift+c"`.
     pub keybinds: Vec<(String, String)>,
+    /// Run the window on XWayland instead of native Wayland.
+    ///
+    /// winit (the windowing layer under iced) implements file drag & drop
+    /// only for X11; on Wayland the compositor has no way to hand a drop
+    /// to the app and shows a "not allowed" cursor instead. Switching
+    /// backends restores drag & drop at the cost of XWayland scaling.
+    pub x11_backend: bool,
 }
 
 impl Config {
@@ -51,6 +58,7 @@ impl Default for Config {
             glow_intensity_top: 1.0,
             glow_intensity_bottom: 1.0,
             keybinds: Vec::new(),
+            x11_backend: false,
         }
     }
 }
@@ -127,6 +135,7 @@ fn parse_line(cfg: &mut Config, line: &str) {
                 }
             }
             "shell" => cfg.shell = value.to_string(),
+            "x11_backend" => cfg.x11_backend = value == "true",
             "glow_blue" => {
                 if let Ok(v) = u32::from_str_radix(value.trim_start_matches("0x"), 16) {
                     cfg.glow_blue = v;
@@ -175,7 +184,7 @@ pub fn save(cfg: &Config) {
 /// Render the config as `key = value` lines (the on-disk format).
 fn serialize(cfg: &Config) -> String {
     let mut text = format!(
-        "statusbar_visible = {}\ntabs_vertical = {}\nsidebar_width = {:.1}\nshell = {}\nglow_blue = {:#06x}\nglow_amber = {:#06x}\nglow_intensity_top = {:.2}\nglow_intensity_bottom = {:.2}\n",
+        "statusbar_visible = {}\ntabs_vertical = {}\nsidebar_width = {:.1}\nshell = {}\nglow_blue = {:#06x}\nglow_amber = {:#06x}\nglow_intensity_top = {:.2}\nglow_intensity_bottom = {:.2}\nx11_backend = {}\n",
         cfg.statusbar_visible,
         cfg.tabs_vertical,
         cfg.sidebar_width,
@@ -183,7 +192,8 @@ fn serialize(cfg: &Config) -> String {
         cfg.glow_blue,
         cfg.glow_amber,
         cfg.glow_intensity_top,
-        cfg.glow_intensity_bottom
+        cfg.glow_intensity_bottom,
+        cfg.x11_backend
     );
     for (id, combo) in &cfg.keybinds {
         text.push_str(&format!("keybind_{id} = {combo}\n"));
@@ -194,6 +204,28 @@ fn serialize(cfg: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn x11_backend_round_trips() {
+        let cfg = Config {
+            x11_backend: true,
+            ..Default::default()
+        };
+        let text = serialize(&cfg);
+        assert!(text.contains("x11_backend = true"));
+
+        let mut parsed = Config::default();
+        for line in text.lines() {
+            parse_line(&mut parsed, line);
+        }
+        assert!(parsed.x11_backend);
+
+        // Defaults stay off, so existing users are unaffected.
+        assert!(!Config::default().x11_backend);
+        let mut off = Config::default();
+        parse_line(&mut off, "x11_backend = false");
+        assert!(!off.x11_backend);
+    }
 
     #[test]
     fn parse_line_overrides_defaults() {

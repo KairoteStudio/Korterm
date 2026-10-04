@@ -201,9 +201,126 @@ fn is_login_capable(program: &str) -> bool {
     )
 }
 
+impl PtySession {
+    /// PID of the shell process running in this PTY.
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
+    /// Whether a *foreground* program is running in this PTY.
+    ///
+    /// Answers it from the kernel rather than guessing: on Linux the
+    /// terminal's foreground process group lives in field 6 (`tpgid`)
+    /// of `/proc/<shell-pid>/stat`, while the shell's own group is field
+    /// 5 (`pgrp`). While the shell waits at a prompt they are equal; the
+    /// moment a command takes over the terminal they differ.
+    ///
+    /// Background jobs (`cmd &`) are correctly *not* reported — the
+    /// foreground group is still the shell's.
+    pub fn foreground_job_running(&self) -> bool {
+        let Some(pid) = self.shell_pid() else {
+            return false;
+        };
+        foreground_job_running_for(pid)
+    }
+}
+
+/// `/proc`-based foreground-job check, split out so it can be tested
+/// against an arbitrary PID.
+pub fn foreground_job_running_for(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    // The comm field (2nd) may contain spaces and parentheses, so split
+    // only after the final ')'.
+    let Some(close) = stat.rfind(')') else {
+        return false;
+    };
+    let rest: Vec<&str> = stat[close + 1..].split_whitespace().collect();
+    // After comm the fields are state(3) ppid(4) pgrp(5) session(6)
+    // tty_nr(7) tpgid(8) — so pgrp is index 2 and tpgid index 5.
+    if rest.len() < 6 {
+        return false;
+    }
+    let (Ok(pgrp), Ok(tpgid)) = (rest[2].parse::<u32>(), rest[5].parse::<u32>()) else {
+        return false;
+    };
+    // tpgid == 0 means the process is a session leader with no
+    // controlling terminal — nothing is attached, so nothing is running.
+    tpgid != 0 && tpgid != pgrp
+}
+
 impl Drop for PtySession {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Busy while a foreground command runs, idle once the prompt is back.
+    /// Uses a real PTY, so it exercises the same path the app uses.
+    #[test]
+    fn foreground_job_tracked_across_a_real_command() {
+        let mut session = PtySession::spawn_with(
+            80,
+            24,
+            Some("/bin/sh"),
+            None,
+        )
+        .expect("spawn sh in a pty");
+
+        // Prompt reached: the shell is the foreground group of its tty.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && session.foreground_job_running() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            !session.foreground_job_running(),
+            "a shell waiting at its prompt is not a foreground job"
+        );
+
+        // Start something and give the kernel a moment to switch groups.
+        session.write(b"sleep 3\n").expect("type command");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut seen_busy = false;
+        while Instant::now() < deadline {
+            if session.foreground_job_running() {
+                seen_busy = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(seen_busy, "a running foreground command must be detected");
+        assert!(session.shell_pid().is_some());
+    }
+
+    #[test]
+    fn background_jobs_are_not_foreground() {
+        let mut session = PtySession::spawn_with(80, 24, Some("/bin/sh"), None)
+            .expect("spawn sh in a pty");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && session.foreground_job_running() {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // `cmd &` returns to the prompt immediately while the job lives on.
+        session.write(b"sleep 30 &\n").expect("background job");
+        std::thread::sleep(Duration::from_millis(700));
+        assert!(
+            !session.foreground_job_running(),
+            "a background job leaves the shell in the foreground group"
+        );
+    }
+
+    #[test]
+    fn missing_pid_is_not_busy() {
+        assert!(!foreground_job_running_for(u32::MAX));
+        // Our own process has a controlling tty only when run from a
+        // terminal; either way the parser must not panic.
+        let me = std::process::id();
+        let _ = foreground_job_running_for(me);
     }
 }

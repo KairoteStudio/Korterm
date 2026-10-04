@@ -249,6 +249,13 @@ pub struct TerminalPanel {
     /// Pending destructive close, shown as a confirmation dialog when a
     /// program is still running in that terminal.
     pub close_confirm: Option<CloseTarget>,
+    /// Mirror of `config::Config::x11_backend`, kept in the panel so the
+    /// settings row can render the current value.
+    pub x11_backend: bool,
+    /// Install command waiting for the next terminal to finish starting
+    /// (`Some(true)` = press Enter as well). Set when the user asks to
+    /// run it while the settings tab is in front.
+    pending_install: Option<bool>,
     /// Whether the sidebar resize handle is being dragged.
     pub sidebar_dragging: bool,
     /// Active settings section (left nav).
@@ -401,6 +408,12 @@ pub enum Message {
     ShellCopyInstallCmd,
     /// Type that command into the focused terminal (no auto-run).
     ShellPasteInstallCmd,
+    /// Type it *and* press Enter, so installing the missing shell
+    /// components is one click from the settings page.
+    ShellRunInstallCmd,
+    /// Backend switch (takes effect after a restart).
+    BackendUseX11,
+    BackendUseWayland,
     ToggleTerminal,
     CloseWindow,
     MinimizeWindow,
@@ -500,6 +513,9 @@ impl Clone for Message {
             Message::ShellIntegrationDisable => Message::ShellIntegrationDisable,
             Message::ShellCopyInstallCmd => Message::ShellCopyInstallCmd,
             Message::ShellPasteInstallCmd => Message::ShellPasteInstallCmd,
+            Message::ShellRunInstallCmd => Message::ShellRunInstallCmd,
+            Message::BackendUseX11 => Message::BackendUseX11,
+            Message::BackendUseWayland => Message::BackendUseWayland,
             Message::TermSelectAll => Message::TermSelectAll,
             Message::ToggleTerminal => Message::ToggleTerminal,
             Message::CloseWindow => Message::CloseWindow,
@@ -596,6 +612,9 @@ impl std::fmt::Debug for Message {
             Message::ShellIntegrationDisable => write!(f, "ShellIntegrationDisable"),
             Message::ShellCopyInstallCmd => write!(f, "ShellCopyInstallCmd"),
             Message::ShellPasteInstallCmd => write!(f, "ShellPasteInstallCmd"),
+            Message::ShellRunInstallCmd => write!(f, "ShellRunInstallCmd"),
+            Message::BackendUseX11 => write!(f, "BackendUseX11"),
+            Message::BackendUseWayland => write!(f, "BackendUseWayland"),
             Message::TermSelectAll => write!(f, "TermSelectAll"),
             Message::ToggleTerminal => write!(f, "ToggleTerminal"),
             Message::CloseWindow => write!(f, "CloseWindow"),
@@ -676,6 +695,8 @@ impl TerminalPanel {
             term_default_shell: cfg.shell,
             shell_notice: None,
             close_confirm: None,
+            x11_backend: cfg.x11_backend,
+            pending_install: None,
             sidebar_dragging: false,
             settings_section: crate::settings::Section::Appearance,
             picker: None,
@@ -756,6 +777,41 @@ impl TerminalPanel {
             .unwrap_or(false)
     }
 
+    /// Put the `sudo apt install …` line on the focused terminal's
+    /// prompt, optionally pressing Enter for it.
+    ///
+    /// Opening a fresh tab first matters: the settings page is itself a
+    /// tab, and running a package install over the settings session
+    /// would scroll the page's own output away.
+    fn send_install_command(&mut self, run: bool) -> Task<Message> {
+        let cmd = self.shell_status.install_command();
+        if cmd.is_empty() {
+            return Task::none();
+        }
+        // Never type into the settings page: open a real terminal tab and
+        // queue the command for when it finishes starting.
+        let usable = self
+            .active_term()
+            .map(|t| t.kind == SessionKind::Terminal)
+            .unwrap_or(false);
+        if !usable {
+            self.pending_install = Some(run);
+            return self.update(Message::TermNew);
+        }
+        let mut text = cmd;
+        text.push(' ');
+        if run {
+            text.push('\r');
+        }
+        if let Some(i) = self.active_terminal {
+            if let Some(t) = self.terminals.get_mut(i) {
+                t.term.input(text.as_bytes());
+            }
+        }
+        self.terminal_focused = true;
+        Task::none()
+    }
+
     pub fn update(&mut self, message: Message) -> Task<Message> {
         // Mirror the keymap for the capture-free keyboard listener.
         crate::keybinds::sync_live(&self.keybinds, self.keybind_capture);
@@ -800,6 +856,22 @@ impl TerminalPanel {
                 );
                 self.active_terminal = Some(self.terminals.len() - 1);
                 self.reflow_active_terminal();
+                // A "install the shell components" click may have been
+                // waiting for a real terminal to exist.
+                if let Some(run) = self.pending_install.take() {
+                    let cmd = self.shell_status.install_command();
+                    if !cmd.is_empty() {
+                        let mut text = cmd;
+                        text.push(' ');
+                        if run {
+                            text.push('\r');
+                        }
+                        if let Some(t) = self.terminals.last_mut() {
+                            t.term.input(text.as_bytes());
+                        }
+                        self.terminal_focused = true;
+                    }
+                }
                 return self.sync_drag_strip();
             }
             Message::TitlebarGripHover(hovered) => {
@@ -1498,15 +1570,20 @@ impl TerminalPanel {
                 }
             }
             Message::ShellPasteInstallCmd => {
-                let cmd = self.shell_status.install_command();
-                if !cmd.is_empty() {
-                    let mut text = cmd;
-                    text.push(' ');
-                    if let Some(term) = self.active_term_mut() {
-                        term.term.input(text.as_bytes());
-                    }
-                    self.terminal_focused = true;
-                }
+                return self.send_install_command(false);
+            }
+            Message::ShellRunInstallCmd => {
+                return self.send_install_command(true);
+            }
+            Message::BackendUseX11 => {
+                self.x11_backend = true;
+                self.save_config();
+                self.shell_notice = Some("已切换到 X11 后端 · 重启 Korterm 后生效".into());
+            }
+            Message::BackendUseWayland => {
+                self.x11_backend = false;
+                self.save_config();
+                self.shell_notice = Some("已恢复 Wayland 后端 · 重启 Korterm 后生效".into());
             }
             Message::FileDropped(path) => {
                 // A file/folder dragged in from the file manager inserts
@@ -1822,6 +1899,7 @@ impl TerminalPanel {
                 .iter()
                 .map(|(a, c)| (a.id().to_string(), c.clone()))
                 .collect(),
+            x11_backend: self.x11_backend,
         });
     }
 
@@ -2533,6 +2611,19 @@ impl TerminalPanel {
 
     fn handle_event(&mut self, event: Event) -> Task<Message> {
         match &event {
+            Event::Window(iced::window::Event::CloseRequested) => {
+                // The WM close button, Alt+F4 and the session manager all
+                // land here rather than on our titlebar button, so this
+                // is the path most closes actually take.
+                if self.close_confirm.is_none() && self.active_term_busy() {
+                    self.close_confirm = Some(CloseTarget::Window);
+                    return Task::none();
+                }
+                self.close_confirm = None;
+                if let Some(id) = self.main_window {
+                    return iced::window::close(id);
+                }
+            }
             Event::Window(iced::window::Event::Resized(size)) => {
                 self.window_size = (size.width, size.height);
                 // Recompute the resize base: the compositor may have

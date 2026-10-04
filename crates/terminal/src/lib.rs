@@ -498,7 +498,18 @@ impl Terminal {
     /// user on every close. Full-screen programs are still caught by the
     /// alternate-screen flag, which every TUI sets.
     pub fn is_busy(&self) -> bool {
-        self.buf.alt_screen || (self.shell_marks && !self.buf.at_prompt)
+        if self.buf.alt_screen {
+            return true;
+        }
+        if self.shell_marks && !self.buf.at_prompt {
+            return true;
+        }
+        // Kernel answer, works for every shell with no integration:
+        // is the terminal's foreground process group still the shell's?
+        self.pty
+            .as_ref()
+            .map(|p| p.foreground_job_running())
+            .unwrap_or(false)
     }
 
     /// Begin a new selection at the given viewport cell. The anchor is

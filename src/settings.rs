@@ -27,6 +27,7 @@ pub const GLOW_PRESETS: [u32; 8] = [
 pub enum Section {
     Appearance,
     Shell,
+    System,
     Glow,
     Keybinds,
     About,
@@ -37,6 +38,7 @@ impl Section {
         match self {
             Section::Appearance => "外观",
             Section::Shell => "Shell",
+            Section::System => "系统",
             Section::Glow => "光晕",
             Section::Keybinds => "快捷键",
             Section::About => "关于",
@@ -47,15 +49,17 @@ impl Section {
         match self {
             Section::Appearance => Icon::PanelRight,
             Section::Shell => Icon::Terminal,
+            Section::System => Icon::Settings,
             Section::Glow => Icon::LayoutGrid,
             Section::Keybinds => Icon::Square,
             Section::About => Icon::Info,
         }
     }
 
-    pub const ALL: [Section; 5] = [
+    pub const ALL: [Section; 6] = [
         Section::Appearance,
         Section::Shell,
+        Section::System,
         Section::Glow,
         Section::Keybinds,
         Section::About,
@@ -95,6 +99,7 @@ pub fn settings_panel(app: &TerminalPanel) -> iced::Element<'static, Message> {
     let content = container(match app.settings_section {
         Section::Appearance => appearance_section(app),
         Section::Shell => shell_section(app),
+        Section::System => system_section(app),
         Section::Glow => glow_section(app),
         Section::Keybinds => keybinds_section(app),
         Section::About => about_section(),
@@ -960,6 +965,7 @@ fn shell_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
                 iced::widget::row![
                     action_button("复制命令", Message::ShellCopyInstallCmd, false),
                     action_button("粘贴到终端", Message::ShellPasteInstallCmd, false),
+                    action_button("粘贴并执行", Message::ShellRunInstallCmd, true),
                 ]
                 .spacing(8.0)
                 .into(),
@@ -992,6 +998,56 @@ fn shell_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
     rows = rows.push(
         container(
             text("启用后 Korterm 会写入 ~/.config/korterm/shell-integration/ 并在你的 shell 配置末尾加载它；首次修改前会自动备份，可随时移除。启用后终端能感知命令的开始与结束，关闭标签页或窗口前会先确认。")
+                .size(11.0)
+                .color(theme::DIM),
+        )
+        .padding(crate::styles::pad4(10.0, 0.0, 0.0, 0.0))
+        .width(Length::Fill),
+    );
+
+    container(rows).padding(16.0).into()
+}
+
+fn system_section(app: &TerminalPanel) -> iced::Element<'static, Message> {
+    // Which backend are we actually on? winit picks X11 only when
+    // WAYLAND_DISPLAY is unset, so this mirrors its own rule.
+    let on_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+    let backend = if on_wayland { "Wayland" } else { "X11 (XWayland)" };
+
+    let mut rows = iced::widget::column![]
+        .spacing(2.0)
+        .width(Length::Fill);
+    rows = rows.push(section_title("系统"));
+
+    rows = rows.push(setting_row(
+        "窗口后端",
+        text(backend.to_string()).size(12.0).color(theme::TEXT).into(),
+    ));
+
+    rows = rows.push(setting_row(
+        "文件拖放",
+        text(if on_wayland {
+            "Wayland 下不支持"
+        } else {
+            "可用"
+        })
+        .size(12.0)
+        .color(theme::DIM)
+        .into(),
+    ));
+
+    rows = rows.push(setting_row(
+        "切换到 X11",
+        if app.x11_backend {
+            action_button("恢复 Wayland", Message::BackendUseWayland, true)
+        } else {
+            action_button("启用 X11 后端", Message::BackendUseX11, true)
+        },
+    ));
+
+    rows = rows.push(
+        container(
+            text("文件拖放依赖 X11 后端（底层窗口库尚未实现 Wayland 拖放协议）。切换后需要重启 Korterm 生效；也可以用 korterm --x11 只为这一次启动启用。")
                 .size(11.0)
                 .color(theme::DIM),
         )

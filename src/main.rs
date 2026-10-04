@@ -45,7 +45,9 @@ impl iced::Program for Korterm {
             size: iced::Size::new(1000.0, 700.0),
             min_size: Some(iced::Size::new(600.0, 400.0)),
             resizable: true,
-            exit_on_close_request: true,
+            // Handled ourselves: a terminal with a running program must
+            // ask before it disappears (see CloseRequested).
+            exit_on_close_request: false,
             position: window::Position::Centered,
             decorations: false,
             ..Default::default()
@@ -139,6 +141,23 @@ fn main() -> iced::Result {
     if args.iter().any(|a| a == "--quick") {
         return quick::run();
     }
+
+    // File drag & drop only exists on the X11 backend (winit has no
+    // wl_data_device implementation), so `--x11` — or the saved
+    // preference — makes us open the window through XWayland instead.
+    // Must happen before iced/winit touch the environment.
+    let force_x11 = args.iter().any(|a| a == "--x11")
+        || std::env::var("KORTERM_X11").is_ok_and(|v| v == "1");
+    let want_x11 = force_x11 || crate::config::load().x11_backend;
+    if want_x11 && std::env::var("WAYLAND_DISPLAY").is_ok() {
+        // SAFETY: single-threaded startup, before any other thread can
+        // observe the environment.
+        unsafe {
+            std::env::remove_var("WAYLAND_DISPLAY");
+            std::env::remove_var("WAYLAND_SOCKET");
+        }
+    }
+
     iced_winit::run(Korterm)
         .map_err(iced::Error::from)
 }

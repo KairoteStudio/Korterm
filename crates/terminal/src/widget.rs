@@ -7,11 +7,12 @@
 //! rich_text widget tree reconstruction. Matches xterm.js's DOM renderer
 //! and JediTerm's `paintComponent` approach.
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::OnceLock;
 
 use iced::advanced::text::{
     Alignment, Paragraph, Renderer as TextRenderer, Text,
 };
+use iced::font::Family;
 use iced::mouse;
 use iced::widget::canvas::{self, Canvas};
 use iced::widget::container;
@@ -26,29 +27,71 @@ use crate::ease_out_cubic;
 use crate::normalize;
 use crate::attr::{Attr, CM_P16, CM_P256, CM_RGB};
 
-static MEASURED_CHAR_W: AtomicU32 = AtomicU32::new(0);
+/// Terminal font, measured against the real shaper rather than trusted.
+///
+/// The canvas draws a run of same-styled cells as one string and lets the
+/// shaper place every glyph, but the *next* run starts at a grid
+/// coordinate.  The two only line up while each glyph's advance equals
+/// the cell slot it was given — and that is a property of the font, not
+/// of the terminal.  Asking for `Family::Monospace` gives no such
+/// guarantee: fontconfig resolves the generic "monospace" family to
+/// whatever covers the session language best, which on a CJK desktop is
+/// a CJK face (Noto Sans CJK here).  That face has *proportional* Latin
+/// (space 0.22em, `M` 0.81em, `i` 0.26em — not a monospace face at all)
+/// and *full-width* block elements (█░▏ = 1.00em = 1.23 cells).
+///
+/// An apt progress bar is fifty block characters on one line, so it
+/// drifted 0.23 × 50 ≈ 11 cells past the width apt itself computed, and
+/// pushed everything behind it off the right edge; box drawing was just
+/// as wrong.  Programs lay their bars out with `wcwidth`, which counts
+/// those characters as one column — the grid has to agree with them.
+///
+/// So: probe.  Pick a family whose Latin glyphs share one advance and
+/// whose block glyph is exactly one cell, take the cell width from that
+/// family, and scale each width class so its advance matches its slot.
+/// Whatever fonts a machine has, grid and glyphs agree afterwards.
+pub struct TerminalFont {
+    pub font: Font,
+    /// Width of one grid cell, in pixels.
+    pub cell_w: f32,
+    /// Font-size multiplier for 1-cell and 2-cell glyphs.
+    pub scale: [f32; 3],
+}
 
-pub fn measured_char_width() -> Option<f32> {
-    let bits = MEASURED_CHAR_W.load(Ordering::Relaxed);
-    if bits == 0 {
-        None
-    } else {
-        Some(f32::from_bits(bits))
+impl TerminalFont {
+    /// Rendered size that lands a `width`-cell glyph on its slot.
+    pub fn size_for(&self, width: u8) -> f32 {
+        FONT_SIZE * self.scale[width.clamp(1, 2) as usize]
     }
 }
 
-fn store_char_width(w: f32) {
-    if w > 0.0 && w.is_finite() {
-        MEASURED_CHAR_W.store(w.to_bits(), Ordering::Relaxed);
-    }
-}
+/// Families to try, best first.  All are plain Latin monospaced faces:
+/// the ones that also carry CJK (Noto Sans Mono CJK, WenQuanYi Micro Hei
+/// Mono) render block elements full-width, which is the very thing being
+/// fixed, so they are only ever reached as a last resort.
+const MONO_CANDIDATES: &[&str] = &[
+    "DejaVu Sans Mono",
+    "JetBrains Mono",
+    "Noto Sans Mono",
+    "Liberation Mono",
+    "Ubuntu Mono",
+    "Fira Mono",
+    "Source Code Pro",
+    "Cascadia Mono",
+    "MesloLGS NF",
+    "Iosevka Term",
+    "Hack",
+    "Inconsolata",
+    "Terminus",
+];
 
-fn measure_char_width() -> f32 {
-    const REPEAT: usize = 32;
-    let sample = "W".repeat(REPEAT);
-    let text = Text {
-        content: sample.as_str(),
-        font: Font::MONOSPACE,
+static TERMINAL_FONT: OnceLock<TerminalFont> = OnceLock::new();
+
+/// Advance width of `text` shaped with `font` at [`FONT_SIZE`].
+fn text_advance(text: &str, font: Font) -> f32 {
+    let t = Text {
+        content: text,
+        font,
         size: Pixels(FONT_SIZE),
         line_height: iced::advanced::text::LineHeight::default(),
         bounds: Size::new(f32::INFINITY, f32::INFINITY),
@@ -57,8 +100,84 @@ fn measure_char_width() -> f32 {
         shaping: iced::advanced::text::Shaping::Advanced,
         wrapping: iced::advanced::text::Wrapping::default(),
     };
-    let p = <Renderer as TextRenderer>::Paragraph::with_text(text);
-    p.min_width() / REPEAT as f32
+    <Renderer as TextRenderer>::Paragraph::with_text(t).min_width()
+}
+
+fn probe_terminal_font() -> TerminalFont {
+    let mut monospaced: Option<(Font, f32)> = None;
+    for name in MONO_CANDIDATES {
+        let font = Font {
+            family: Family::Name(*name),
+            ..Font::DEFAULT
+        };
+        // A single Latin letter defines the cell, but only if the face is
+        // really monospaced — otherwise every row would be laid out on
+        // proportional advances and the grid would mean nothing.
+        let ascii = text_advance("M", font);
+        if ascii <= 0.0 {
+            continue;
+        }
+        let is_mono = (text_advance("i", font) - ascii).abs() < ascii * 0.02
+            && (text_advance("W", font) - ascii).abs() < ascii * 0.02;
+        if !is_mono {
+            continue;
+        }
+        if monospaced.is_none() {
+            monospaced = Some((font, ascii));
+        }
+        // One-cell glyphs are what progress bars, box drawing and
+        // separators are made of; a face that gets those wrong cannot be
+        // corrected by scaling without tearing the glyphs apart.
+        if (text_advance("█", font) - ascii).abs() <= ascii * 0.02 {
+            return TerminalFont::measured(font, ascii);
+        }
+    }
+    let (font, cell_w) = monospaced.unwrap_or((Font::MONOSPACE, CELL_W));
+    TerminalFont::measured(font, cell_w)
+}
+
+impl TerminalFont {
+    fn measured(font: Font, cell_w: f32) -> Self {
+        // Both probes fall back through the shaper when the family lacks
+        // the glyph, so these are the advances the cells will actually
+        // be drawn with, not what the family advertises.
+        TerminalFont {
+            font,
+            cell_w,
+            scale: scales_for(cell_w, text_advance("█", font), text_advance("汉", font)),
+        }
+    }
+}
+
+/// Font-size multipliers that make each width class land on its slot.
+///
+/// `narrow_adv` / `wide_adv` are what the shaper actually advances for a
+/// one-cell and a two-cell glyph — for a CJK face that is *more* than the
+/// slot, for a Latin monospace face less, and only the first case can be
+/// seen at all as text landing on top of its neighbour.
+fn scales_for(cell_w: f32, narrow_adv: f32, wide_adv: f32) -> [f32; 3] {
+    // Never wider than its slot: a glyph that overflows lands on top of
+    // its neighbour, a glyph that is merely small just leaves a gap.
+    let narrow = if narrow_adv > 0.0 {
+        (cell_w / narrow_adv).clamp(0.55, 1.0)
+    } else {
+        1.0
+    };
+    let wide = if wide_adv > 0.0 {
+        (2.0 * cell_w / wide_adv).clamp(0.7, 1.4)
+    } else {
+        1.0
+    };
+    [1.0, narrow, wide]
+}
+
+/// The measured terminal font. Probed once, on first use.
+pub fn terminal_font() -> &'static TerminalFont {
+    TERMINAL_FONT.get_or_init(probe_terminal_font)
+}
+
+pub fn measured_char_width() -> Option<f32> {
+    TERMINAL_FONT.get().map(|f| f.cell_w)
 }
 
 const PALETTE: [(u8, u8, u8); 16] = [
@@ -171,7 +290,42 @@ pub fn cell_height() -> f32 {
 }
 
 pub fn cell_width() -> f32 {
-    measured_char_width().unwrap_or(CELL_W)
+    terminal_font().cell_w
+}
+
+/// Paint one run of same-styled, same-width-class cells.
+///
+/// `bg_w` comes from the grid (columns × cell width), never from the
+/// character count: a CJK cell is one *character* but two *columns*, and
+/// counting characters left every coloured background behind Chinese text
+/// at half its real width.
+#[allow(clippy::too_many_arguments)]
+fn flush_run(
+    frame: &mut canvas::Frame,
+    text: &str,
+    x: f32,
+    text_y: f32,
+    row_top: f32,
+    fg: Color,
+    bg: Color,
+    bg_w: f32,
+    size: f32,
+    font: Font,
+) {
+    if text.is_empty() {
+        return;
+    }
+    if bg != Color::TRANSPARENT && bg_w > 0.0 {
+        frame.fill_rectangle(Point::new(x, row_top), Size::new(bg_w, CELL_H), bg);
+    }
+    frame.fill_text(canvas::Text {
+        content: text.to_string(),
+        position: Point::new(x, text_y),
+        color: fg,
+        size: Pixels(size),
+        font,
+        ..canvas::Text::default()
+    });
 }
 
 /// Map a pointer position (canvas-local pixels) to a grid cell.
@@ -210,11 +364,8 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
         bounds: Rectangle,
         _cursor: mouse::Cursor,
     ) -> Vec<canvas::Geometry> {
-        let char_w = measured_char_width().unwrap_or_else(|| {
-            let w = measure_char_width();
-            store_char_width(w);
-            w
-        });
+        let tf = terminal_font();
+        let char_w = tf.cell_w;
 
         let mut frame = canvas::Frame::new(renderer, bounds.size());
 
@@ -250,6 +401,11 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
             let mut current_bg = Color::TRANSPARENT;
             let mut text_x = PAD_X;
             let mut span_start_x = PAD_X;
+            // Glyphs are placed by the shaper, so a run may only mix cells
+            // that share a width class; 1-cell and 2-cell glyphs are also
+            // rendered at different sizes, which the shaper has to see as
+            // separate runs.
+            let mut current_class = 1u8;
 
             for cell in line.cells.iter() {
                 if cell.width == 0 {
@@ -260,57 +416,50 @@ impl<'a, M: 'static> canvas::Program<M> for TerminalCanvas<'a> {
                     char::from_u32(cell.codepoint).unwrap_or(' ')
                 };
                 let span_bg = if bg == theme.bg { Color::TRANSPARENT } else { bg };
+                let class = cell.width.clamp(1, 2);
 
-                // Flush if style changed
-                if !current_text.is_empty() && (fg != current_fg || span_bg != current_bg) {
-                    if current_bg != Color::TRANSPARENT {
-                        let text_width = current_text.chars().count() as f32 * char_w;
-                        frame.fill_rectangle(
-                            Point::new(span_start_x, row_top),
-                            Size::new(text_width, CELL_H),
-                            current_bg,
-                        );
-                    }
-                    frame.fill_text(canvas::Text {
-                        content: current_text.clone(),
-                        position: Point::new(span_start_x, text_y),
-                        color: current_fg,
-                        size: Pixels(FONT_SIZE),
-                        font: Font::MONOSPACE,
-                        ..canvas::Text::default()
-                    });
+                // Flush if style or width class changed
+                if !current_text.is_empty()
+                    && (fg != current_fg || span_bg != current_bg || class != current_class)
+                {
+                    flush_run(
+                        &mut frame,
+                        &current_text,
+                        span_start_x,
+                        text_y,
+                        row_top,
+                        current_fg,
+                        current_bg,
+                        text_x - span_start_x,
+                        tf.size_for(current_class),
+                        tf.font,
+                    );
                     current_text.clear();
-                    span_start_x = text_x;
                 }
 
                 if current_text.is_empty() {
                     current_fg = fg;
                     current_bg = span_bg;
                     span_start_x = text_x;
+                    current_class = class;
                 }
                 current_text.push(ch);
                 text_x += char_w * cell.width as f32;
             }
 
             // Flush remaining
-            if !current_text.is_empty() {
-                if current_bg != Color::TRANSPARENT {
-                    let text_width = current_text.chars().count() as f32 * char_w;
-                    frame.fill_rectangle(
-                        Point::new(span_start_x, row_top),
-                        Size::new(text_width, CELL_H),
-                        current_bg,
-                    );
-                }
-                frame.fill_text(canvas::Text {
-                    content: current_text.clone(),
-                    position: Point::new(span_start_x, text_y),
-                    color: current_fg,
-                    size: Pixels(FONT_SIZE),
-                    font: Font::MONOSPACE,
-                    ..canvas::Text::default()
-                });
-            }
+            flush_run(
+                &mut frame,
+                &current_text,
+                span_start_x,
+                text_y,
+                row_top,
+                current_fg,
+                current_bg,
+                text_x - span_start_x,
+                tf.size_for(current_class),
+                tf.font,
+            );
         }
 
         // Draw search highlights (all matches + a brighter current one)
@@ -423,11 +572,8 @@ pub fn terminal_view<'a, M: 'static>(
     _scroll_id: iced::widget::Id,
     on_resize: impl Fn(usize, usize, f32, f32) -> M + 'a,
 ) -> Element<'a, M> {
-    // Measure char width if not yet measured
-    if measured_char_width().is_none() {
-        let w = measure_char_width();
-        store_char_width(w);
-    }
+    // Measure the font (and with it the grid) once, on first use.
+    let _ = terminal_font();
 
     let canvas = Canvas::new(TerminalCanvas { term, focused })
         .width(Length::Fill)
@@ -542,7 +688,6 @@ mod tests {
     #[test]
     fn clicks_outside_the_grid_clamp_to_the_edge_cells() {
         let t = grid_term(80, 24);
-        let char_w = cell_width();
         // Above the first row and left of the first column.
         assert_eq!(pixel_to_cell(&t, -100.0, -100.0), (0, 0));
         // Below the last row and right of the last column.
@@ -563,5 +708,66 @@ mod tests {
         let vy = 7usize;
         let my = PAD_Y + (vy as f32 + 0.5) * CELL_H;
         assert_eq!(pixel_to_cell(&t, PAD_X + char_w * 3.5, my), (3, vy));
+    }
+}
+
+#[cfg(test)]
+mod font_tests {
+    use super::{scales_for, TerminalFont, FONT_SIZE};
+    use iced::Font;
+
+    /// Advance, at [`FONT_SIZE`], a glyph ends up with once rendered at
+    /// [`TerminalFont::size_for`].
+    fn drawn_advance(tf: &TerminalFont, advance: f32, width: u8) -> f32 {
+        advance * tf.size_for(width) / FONT_SIZE
+    }
+
+    fn font_with(cell_w: f32, narrow: f32, wide: f32) -> TerminalFont {
+        TerminalFont {
+            font: Font::MONOSPACE,
+            cell_w,
+            scale: scales_for(cell_w, narrow, wide),
+        }
+    }
+
+    /// The apt case: `Family::Monospace` resolved to Noto Sans CJK, whose
+    /// block and CJK glyphs are 1.23 cells wide. Fifty of them on one
+    /// progress-bar line overran the row by eleven columns.
+    #[test]
+    fn a_wide_one_cell_glyph_is_scaled_back_onto_its_cell() {
+        let cell_w = 0.812 * FONT_SIZE;
+        let tf = font_with(cell_w, 1.23 * cell_w, 1.23 * cell_w);
+        assert!(drawn_advance(&tf, 1.23 * cell_w, 1) <= cell_w + 0.01);
+        // Two cells cannot be reached without 1.63× — a glyph that size
+        // would tower over its row — so the clamp holds it there instead.
+        // This is exactly why the probe prefers a family whose one-cell
+        // glyphs already fit: a CJK-primary face cannot be rescued for
+        // both classes at once.
+        assert!(drawn_advance(&tf, 1.23 * cell_w, 2) <= 2.0 * cell_w * 1.4);
+    }
+
+    /// DejaVu Sans Mono: block glyphs already fit, CJK comes from a
+    /// fallback at 1.66 cells and has to grow to fill two.
+    #[test]
+    fn a_narrow_two_cell_glyph_is_scaled_up_to_its_two_cells() {
+        let cell_w = 0.602 * FONT_SIZE;
+        let tf = font_with(cell_w, cell_w, 1.66 * cell_w);
+        assert!((drawn_advance(&tf, cell_w, 1) - cell_w).abs() < 0.01);
+        assert!((drawn_advance(&tf, 1.66 * cell_w, 2) - 2.0 * cell_w).abs() < 0.05);
+    }
+
+    #[test]
+    fn a_matching_font_is_left_alone() {
+        let cell_w = 0.6 * FONT_SIZE;
+        let tf = font_with(cell_w, cell_w, 2.0 * cell_w);
+        assert!((tf.size_for(1) - FONT_SIZE).abs() < 0.001);
+        assert!((tf.size_for(2) - FONT_SIZE).abs() < 0.001);
+    }
+
+    #[test]
+    fn missing_glyphs_do_not_produce_a_zero_or_huge_size() {
+        let tf = font_with(7.8, 0.0, 0.0);
+        assert!((FONT_SIZE..=FONT_SIZE * 1.4).contains(&tf.size_for(1)));
+        assert!((FONT_SIZE..=FONT_SIZE * 1.4).contains(&tf.size_for(2)));
     }
 }
